@@ -1,0 +1,124 @@
+import os
+import sqlite3
+from pathlib import Path
+
+import pytest
+
+from aipdm.cli import main
+from aipdm.core import db
+from aipdm.core.scanner import index
+from aipdm.core.search import search_text
+
+
+@pytest.fixture
+def db_path(tmp_path: Path) -> Path:
+    return tmp_path / "dados" / "test.sqlite"
+
+
+def rows(db_path: Path) -> dict[str, sqlite3.Row]:
+    conn = db.connect(db_path)
+    try:
+        return {r["rel_path"]: r for r in conn.execute("SELECT * FROM files")}
+    finally:
+        conn.close()
+
+
+def test_first_index_classifies_and_dates(sample_dir: Path, db_path: Path) -> None:
+    stats = index(sample_dir, db_path, workers=1)
+    assert stats.scan.new == 8
+    assert stats.pending == 7  # the .mp4 is only listed
+    assert stats.errors == 1
+
+    files = rows(db_path)
+    wa = files["WhatsApp Images/IMG-20230514-WA0001.jpg"]
+    assert (wa["kind"], wa["taken_at"], wa["date_source"]) == (
+        "image",
+        "2023-05-14",
+        "whatsapp_android",
+    )
+    assert (wa["width"], wa["height"], wa["status"]) == (64, 48, "done")
+    assert wa["hash"] and wa["stages_done"] == "date,thumb,text"
+
+    desktop = files["WhatsApp Images/WhatsApp Image 2022-01-02 at 9.05.09 PM.png"]
+    assert desktop["taken_at"] == "2022-01-02T21:05:09"
+    assert files["camera.jpg"]["date_source"] == "exif"
+    assert files["WhatsApp Documents/contrato.pdf"]["date_source"] == "document"
+    assert files["WhatsApp Documents/contrato.pdf"]["taken_at"] == "2021-03-04T05:06:07"
+    assert files["WhatsApp Documents/relatorio.docx"]["date_source"] == "document"
+    assert files["WhatsApp Stickers/STK-20230101-WA0002.webp"]["is_sticker"] == 1
+
+    mp4 = files["VID-20230514-WA0003.mp4"]
+    assert (mp4["kind"], mp4["status"]) == ("other", "done")
+    broken = files["corrompida.jpg"]
+    assert broken["status"] == "error" and broken["error"]
+
+    thumbs = db_path.with_suffix(".thumbs")
+    assert (thumbs / f"{wa['id']}.jpg").exists()
+    assert (thumbs / f"{files['WhatsApp Documents/contrato.pdf']['id']}.jpg").exists()
+
+
+def test_reindex_without_changes_processes_zero(sample_dir: Path, db_path: Path) -> None:
+    index(sample_dir, db_path, workers=1)
+    stats = index(sample_dir, db_path, workers=1)
+    assert stats.processed == 0
+    assert stats.scan.unchanged == 8
+
+
+def test_changed_missing_and_reappeared(sample_dir: Path, db_path: Path) -> None:
+    index(sample_dir, db_path, workers=1)
+    target = sample_dir / "camera.jpg"
+    st = target.stat()
+    os.utime(target, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000_000))
+    moved = sample_dir.parent / "fora.pdf"
+    (sample_dir / "WhatsApp Documents" / "contrato.pdf").rename(moved)
+
+    stats = index(sample_dir, db_path, workers=1)
+    assert (stats.scan.changed, stats.scan.missing, stats.processed) == (1, 1, 1)
+    assert rows(db_path)["WhatsApp Documents/contrato.pdf"]["status"] == "missing"
+
+    moved.rename(sample_dir / "WhatsApp Documents" / "contrato.pdf")
+    stats = index(sample_dir, db_path, workers=1)
+    assert (stats.scan.reappeared, stats.processed) == (1, 0)
+    assert rows(db_path)["WhatsApp Documents/contrato.pdf"]["status"] == "done"
+
+
+def test_force_reprocesses_without_duplicating_text(sample_dir: Path, db_path: Path) -> None:
+    index(sample_dir, db_path, workers=1)
+    stats = index(sample_dir, db_path, workers=1, force=True)
+    assert stats.processed == 7
+    conn = db.connect(db_path)
+    assert conn.execute("SELECT COUNT(*) FROM texts").fetchone()[0] == 3  # 2 pdf pages + docx
+    conn.close()
+
+
+def test_search_text_ignores_accents(sample_dir: Path, db_path: Path) -> None:
+    index(sample_dir, db_path, workers=1)
+    conn = db.connect(db_path)
+    found = {h.rel_path for h in search_text(conn, "joao")}
+    assert found == {"WhatsApp Documents/contrato.pdf", "WhatsApp Documents/relatorio.docx"}
+    [hit] = search_text(conn, "jurerê")
+    assert hit.page == 2
+    assert search_text(conn, "florianopolis")[0].kind == "docx"
+    assert search_text(conn, 'AND OR "(') == []  # user text is never FTS syntax
+    conn.close()
+
+
+def test_cli_index_status_search(sample_dir: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    assert main(["index", str(sample_dir), "--workers", "1"]) == 0
+    assert "Processados: 7 de 7 (erros: 1)" in capsys.readouterr().out
+    assert main(["index", str(sample_dir), "--workers", "1"]) == 0
+    assert "Processados: 0 de 0" in capsys.readouterr().out
+
+    assert main(["status"]) == 0
+    out = capsys.readouterr().out
+    assert "whatsapp_android" in out and "corrompida.jpg" in out
+
+    assert main(["search", "--text", "Maria"]) == 0
+    assert "contrato.pdf" in capsys.readouterr().out
+
+
+def test_migration_is_idempotent(db_path: Path) -> None:
+    db.connect(db_path).close()
+    conn = db.connect(db_path)
+    assert db.schema_version(conn) == len(db.MIGRATIONS)
+    conn.close()
