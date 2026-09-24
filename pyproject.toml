@@ -1,0 +1,52 @@
+[project]
+name = "aipdm"
+version = "0.1.0"
+description = "Busca offline em fotos e documentos por pessoa, data, objeto e texto."
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "pillow>=12.3.0",
+    "pillow-heif>=1.8.0",
+    "pypdfium2>=5.13.0",
+    "python-docx>=1.2.0",
+    "xxhash>=4.0.1",
+]
+
+[project.scripts]
+aipdm = "aipdm.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/aipdm"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF"]
+
+[tool.mypy]
+python_version = "3.12"
+files = ["src/aipdm/core"]
+
+[[tool.mypy.overrides]]
+module = "aipdm.core.*"
+strict = true
+
+[[tool.mypy.overrides]]
+module = "pypdfium2.*"
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["real: usa a pasta real em AIPDM_TEST_DIR (somente leitura)"]
+
+[dependency-groups]
+dev = [
+    "mypy>=2.3.1",
+    "pytest>=9.1.1",
+    "ruff>=0.16.9",
+]
