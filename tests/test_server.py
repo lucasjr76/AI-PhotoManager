@@ -167,3 +167,68 @@ def test_real_server_handles_parallel_requests(db_path: Path) -> None:
     finally:
         server.should_exit = True
         thread.join(timeout=5)
+
+
+def fake_encoder(_text: str) -> np.ndarray:
+    return np.eye(512, dtype=np.float32)[0]
+
+
+def make_client(db: Path | None, **kw: object) -> TestClient:
+    app = create_app(db, TOKEN, HOST, encoder_factory=lambda: fake_encoder, **kw)  # type: ignore[arg-type]
+    c = TestClient(app, base_url=f"http://{HOST}")
+    c.get(f"/?t={TOKEN}", follow_redirects=False)
+    return c
+
+
+def test_search_endpoint(db_path: Path) -> None:
+    c = make_client(db_path)
+    got = c.get("/api/search", params={"text": "joao"}).json()
+    assert {h["rel_path"] for h in got["hits"]} == {
+        "WhatsApp Documents/contrato.pdf",
+        "WhatsApp Documents/relatorio.docx",
+    }
+    assert got["hits"][0]["snippet"]
+    only_pdf = c.get("/api/search", params={"text": "joao", "kind": ["pdf"]}).json()
+    assert [h["kind"] for h in only_pdf["hits"]] == ["pdf"]
+    listing = c.get("/api/search", params={"date_from": "2023-01-01", "limit": 9999}).json()
+    assert {h["rel_path"] for h in listing["hits"]} >= {"WhatsApp Images/IMG-20230514-WA0001.jpg"}
+
+
+def wait_index(c: TestClient) -> dict:  # type: ignore[type-arg]
+    import time
+
+    for _ in range(600):
+        status = c.get("/api/index").json()
+        if not status["running"]:
+            return status
+        time.sleep(0.05)
+    raise AssertionError("indexação não terminou")
+
+
+def test_welcome_open_new_folder_indexes_it(sample_dir: Path) -> None:
+    c = make_client(None, index_only=frozenset(), workers=1)
+    assert c.get("/api/status").json() == {"root": None}
+    assert c.get("/api/people").status_code == 409  # no folder open yet
+
+    opened = c.post("/api/folders/open", json={"path": str(sample_dir)}).json()
+    assert opened["new"] is True
+    done = wait_index(c)
+    assert done["error"] is None and done["summary"]["processed"] == 7
+    assert c.get("/api/status").json()["root"] == str(sample_dir.resolve())
+
+    # "Re-escanear pasta": nothing changed, nothing processed
+    assert c.post("/api/index", json={}).status_code == 200
+    assert wait_index(c)["summary"]["processed"] == 0
+
+    [folder] = c.get("/api/folders").json()
+    assert folder["current"] and folder["root"] == str(sample_dir.resolve())
+    assert c.post("/api/folders/open", json={"id": folder["id"]}).json()["new"] is False
+
+
+@pytest.mark.parametrize(
+    "body",
+    [{"id": "../../etc/passwd"}, {"id": "0123456789abcdef"}, {"path": "/nao/existe"}, {}],
+)
+def test_open_folder_rejects_bad_input(body: dict) -> None:  # type: ignore[type-arg]
+    c = make_client(None)
+    assert c.post("/api/folders/open", json=body).status_code in (400, 404)

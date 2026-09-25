@@ -7,19 +7,23 @@ files are only ever served by database id, never by a client-supplied path.
 
 import hmac
 import os
+import re
 import sqlite3
 import subprocess
 import sys
 import threading
+import time
 from collections.abc import Awaitable, Callable, Iterator
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, HTTPException, Request, Response
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel
 
-from aipdm.core import db, faces
+from aipdm.core import db, faces, paths, scanner
+from aipdm.core import search as searching
 from aipdm.core.images import load_image
 from aipdm.core.paths import thumbs_dir_for
 
@@ -43,9 +47,59 @@ class Assign(BaseModel):
     name: str | None = None  # new person when person_id is None
 
 
-def create_app(db_path: Path, token: str, allowed_host: str) -> FastAPI:
+class OpenFolder(BaseModel):
+    id: str | None = None  # a recent folder, by database id
+    path: str | None = None  # a folder picked by the user (only ever indexed, never served)
+
+
+class StartIndex(BaseModel):
+    force: bool = False
+
+
+DB_ID = re.compile(r"^[0-9a-f]{16}$")
+
+
+@dataclass
+class IndexJob:
+    running: bool = True
+    done: int = 0
+    total: int = 0
+    started: float = field(default_factory=time.time)
+    seconds: float = 0.0
+    summary: dict[str, object] | None = None
+    error: str | None = None
+    stop: threading.Event = field(default_factory=threading.Event, repr=False)
+
+
+@dataclass
+class State:
+    db: Path | None
+    job: IndexJob | None = None
+    encoder: searching.TextEncoder | None = None
+    lock: threading.Lock = field(default_factory=threading.Lock)
+
+
+def default_encoder() -> searching.TextEncoder | None:
+    from aipdm.core.clip import ClipTextModel
+
+    try:
+        return ClipTextModel(paths.models_dir()).encode
+    except Exception:  # models missing: search falls back to text only
+        return None
+
+
+def create_app(
+    db_path: Path | None,
+    token: str,
+    allowed_host: str,
+    *,
+    encoder_factory: Callable[[], searching.TextEncoder | None] = default_encoder,
+    index_only: frozenset[str] | None = None,
+    workers: int | None = None,
+) -> FastAPI:
+    """`db_path` None: no folder yet (welcome screen). The keyword arguments exist for tests."""
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
-    faces_dir = db_path.with_suffix(".faces")
+    state = State(db_path)
 
     @app.exception_handler(RequestValidationError)
     async def invalid(_request: Request, exc: RequestValidationError) -> JSONResponse:
@@ -53,8 +107,6 @@ def create_app(db_path: Path, token: str, allowed_host: str) -> FastAPI:
         if any(err.get("loc", ("",))[0] == "path" for err in exc.errors()):
             return JSONResponse({"detail": "não encontrado"}, status_code=404)
         return JSONResponse({"detail": "requisição inválida"}, status_code=422)
-
-    thumbs_dir = thumbs_dir_for(db_path)
 
     @app.middleware("http")
     async def guard(
@@ -73,8 +125,13 @@ def create_app(db_path: Path, token: str, allowed_host: str) -> FastAPI:
             return JSONResponse({"detail": "não autorizado"}, status_code=401)
         return await call_next(request)
 
+    def current_db() -> Path:
+        if state.db is None:
+            raise HTTPException(409, "nenhuma pasta aberta")
+        return state.db
+
     def conn() -> Iterator[sqlite3.Connection]:
-        c = db.connect(db_path, cross_thread=True)
+        c = db.connect(current_db(), cross_thread=True)
         try:
             yield c
         finally:
@@ -101,7 +158,16 @@ def create_app(db_path: Path, token: str, allowed_host: str) -> FastAPI:
         app.get(route, include_in_schema=False)(page)
 
     @app.get("/api/status")
-    def status(c: sqlite3.Connection = Conn) -> dict[str, object]:
+    def status() -> dict[str, object]:
+        if state.db is None:
+            return {"root": None}
+        c = db.connect(state.db, cross_thread=True)
+        try:
+            return _status(c)
+        finally:
+            c.close()
+
+    def _status(c: sqlite3.Connection) -> dict[str, object]:
         faces_n, people_n, named, suggested, orphans = c.execute(
             "SELECT (SELECT COUNT(*) FROM faces), (SELECT COUNT(*) FROM people),"
             " (SELECT COUNT(*) FROM people WHERE name IS NOT NULL),"
@@ -116,6 +182,7 @@ def create_app(db_path: Path, token: str, allowed_host: str) -> FastAPI:
             "named": named,
             "suggested": suggested,
             "unassigned": orphans,
+            "files": c.execute("SELECT COUNT(*) FROM files WHERE kind != 'other'").fetchone()[0],
         }
 
     @app.get("/api/people")
@@ -222,6 +289,7 @@ def create_app(db_path: Path, token: str, allowed_host: str) -> FastAPI:
 
     @app.get("/api/faces/{face_id}/crop")
     def crop(face_id: int, c: sqlite3.Connection = Conn) -> FileResponse:
+        faces_dir = current_db().with_suffix(".faces")
         cached = faces_dir / f"{face_id}.jpg"
         if not cached.exists():
             row = c.execute(
@@ -246,7 +314,7 @@ def create_app(db_path: Path, token: str, allowed_host: str) -> FastAPI:
     @app.get("/api/files/{file_id}/thumb")
     def thumb(file_id: int, c: sqlite3.Connection = Conn) -> FileResponse:
         file_row(c, file_id)
-        path = thumbs_dir / f"{file_id}.jpg"
+        path = thumbs_dir_for(current_db()) / f"{file_id}.jpg"
         if not path.exists():
             raise HTTPException(404)
         return FileResponse(path, media_type="image/jpeg")
@@ -259,5 +327,153 @@ def create_app(db_path: Path, token: str, allowed_host: str) -> FastAPI:
         else:
             subprocess.Popen(["xdg-open", str(path)], start_new_session=True)
         return {"ok": "sim"}
+
+    # --- search -------------------------------------------------------------
+
+    @app.get("/api/search")
+    def search(
+        text: str = "",
+        person: list[int] = Query(default=[]),  # noqa: B008
+        date_from: str | None = None,
+        date_to: str | None = None,
+        kind: list[str] = Query(default=[]),  # noqa: B008
+        stickers: bool = False,
+        order: str = "relevance",
+        limit: int = 120,
+        c: sqlite3.Connection = Conn,
+    ) -> dict[str, object]:
+        if text.strip():
+            with state.lock:  # load the CLIP text model once, on first use
+                if state.encoder is None:
+                    state.encoder = encoder_factory()
+        query = searching.Query(
+            text=text,
+            people_ids=tuple(person),
+            date_from=date_from or None,
+            date_to=date_to or None,
+            kinds=tuple(k for k in kind if k in ("image", "pdf", "docx")),
+            stickers=stickers,
+            order="date" if order == "date" else "relevance",
+            limit=max(1, min(limit, 500)),
+        )
+        results = searching.search(c, query, state.encoder)
+        return {
+            "person": results.person,
+            "hits": [asdict(h) for h in results.hits],
+            "mentions": [asdict(h) for h in results.mentions],
+        }
+
+    # --- folders and indexing -------------------------------------------------
+
+    def folder_info(path: Path) -> dict[str, object]:
+        c = db.connect(path, cross_thread=True)
+        try:
+            return {
+                "id": path.stem,
+                "root": db.get_meta(c, "root_path"),
+                "last_index": db.get_meta(c, "last_index_at"),
+                "files": c.execute("SELECT COUNT(*) FROM files").fetchone()[0],
+                "current": path == state.db,
+            }
+        finally:
+            c.close()
+
+    @app.get("/api/folders")
+    def folders() -> list[dict[str, object]]:
+        found = sorted(paths.data_dir().glob("*.sqlite"), key=lambda p: -p.stat().st_mtime)
+        return [folder_info(p) for p in found if DB_ID.match(p.stem)]
+
+    @app.post("/api/folders/open")
+    def open_folder(body: OpenFolder) -> dict[str, object]:
+        with state.lock:
+            if state.job and state.job.running:
+                raise HTTPException(409, "aguarde a indexação atual terminar")
+            if body.id is not None:
+                if (
+                    not DB_ID.match(body.id)
+                    or not (paths.data_dir() / f"{body.id}.sqlite").exists()
+                ):
+                    raise HTTPException(404)
+                state.db = paths.data_dir() / f"{body.id}.sqlite"
+                return {**folder_info(state.db), "new": False}
+            folder = Path(body.path or "").expanduser()
+            if not body.path or not folder.is_dir():
+                raise HTTPException(400, "pasta não encontrada")
+            state.db = paths.db_path_for(folder)
+            new = not state.db.exists()
+            if new:
+                _start_index(folder.resolve(), force=False)
+            return {"id": state.db.stem, "root": str(folder.resolve()), "new": new}
+
+    def _start_index(root: Path, *, force: bool) -> IndexJob:
+        job = IndexJob()
+        target = current_db()
+
+        def progress(done: int, total: int) -> None:
+            job.done, job.total = done, total
+
+        def run() -> None:
+            try:
+                stats = scanner.index(
+                    root,
+                    target,
+                    workers=workers or scanner.default_workers(),
+                    force=force,
+                    only=index_only,
+                    progress=progress,
+                    stop=job.stop,
+                )
+                job.summary = {
+                    "scan": asdict(stats.scan),
+                    "processed": stats.processed,
+                    "pending": stats.pending,
+                    "errors": stats.errors,
+                    "stage_seconds": stats.stage_seconds,
+                    "grouping": asdict(stats.grouping) if stats.grouping else None,
+                    "interrupted": stats.interrupted,
+                }
+            except Exception as exc:
+                job.error = f"{type(exc).__name__}: {exc}"
+            finally:
+                job.seconds = time.time() - job.started
+                job.running = False
+
+        state.job = job
+        threading.Thread(target=run, daemon=True, name="aipdm-index").start()
+        return job
+
+    @app.post("/api/index")
+    def start_index(body: StartIndex, c: sqlite3.Connection = Conn) -> dict[str, object]:
+        with state.lock:
+            if state.job and state.job.running:
+                raise HTTPException(409, "já existe uma indexação em andamento")
+            root = root_of(c)
+            if not root.is_dir():
+                raise HTTPException(400, "a pasta não está acessível")
+            _start_index(root, force=body.force)
+        return index_status()
+
+    @app.post("/api/index/cancel")
+    def cancel_index() -> dict[str, object]:
+        if state.job and state.job.running:
+            state.job.stop.set()
+        return index_status()
+
+    @app.get("/api/index")
+    def index_status() -> dict[str, object]:
+        job = state.job
+        if job is None:
+            return {"running": False}
+        data: dict[str, object] = {
+            "running": job.running,
+            "done": job.done,
+            "total": job.total,
+            "seconds": job.seconds,
+            "summary": job.summary,
+            "error": job.error,
+        }
+        if job.running:
+            data["seconds"] = time.time() - job.started
+        return data
 
     return app
