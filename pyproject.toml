@@ -42,7 +42,7 @@ module = "aipdm.core.*"
 strict = true
 
 [[tool.mypy.overrides]]
-module = "pypdfium2.*"
+module = ["pypdfium2.*", "onnxruntime.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
@@ -59,6 +59,7 @@ dev = [
     "scikit-learn>=1.9.1",
     "torch>=2.14.0",
     "torchvision>=0.29.0",
+    "transformers>=5.17.0",
 ]
 
 [tool.uv]
