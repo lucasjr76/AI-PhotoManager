@@ -271,25 +271,68 @@ function fmtDate(iso) {
   return `${day}/${m}/${y}${t ? " " + t.slice(0, 5) : ""}`;
 }
 
-function results(hits) {
-  const photos = hits.filter((x) => x.kind === "image");
-  const docs = hits.filter((x) => x.kind !== "image");
-  const out = [];
-  if (photos.length) {
-    out.push(h("div", { class: "grid photos" }, photos.map((x) =>
-      h("div", { class: "card photo", title: `${x.rel_path}\nDuplo clique abre a foto`, ondblclick: () => openFile(x.file_id) },
-        h("img", { src: `/api/files/${x.file_id}/thumb`, loading: "lazy", alt: "" }),
-        h("div", { class: "muted small" }, fmtDate(x.taken_at)),
-        x.snippet ? snippet(x.snippet) : null))));
-  }
-  if (docs.length) {
-    out.push(h("div", { class: "docs" }, docs.map((x) =>
-      h("div", { class: "doc", title: "Duplo clique abre o documento", ondblclick: () => openFile(x.file_id) },
-        h("div", {}, h("strong", {}, x.rel_path.split("/").pop()),
-          h("span", { class: "muted small" }, `  ${x.kind.toUpperCase()}${x.page ? " · p. " + x.page : ""} · ${fmtDate(x.taken_at)}`)),
-        x.snippet ? snippet(x.snippet) : null))));
-  }
-  return out.length ? out : [h("div", { class: "empty" }, "Nenhum resultado.")];
+const PAGE = 120;
+
+function photoCard(x) {
+  return h("div", { class: "card photo", title: `${x.rel_path}\nDuplo clique abre a foto`, ondblclick: () => openFile(x.file_id) },
+    h("img", { src: `/api/files/${x.file_id}/thumb`, loading: "lazy", alt: "" }),
+    h("div", { class: "muted small" }, fmtDate(x.taken_at)),
+    x.snippet ? snippet(x.snippet) : null);
+}
+
+function docRow(x) {
+  return h("div", { class: "doc", title: "Duplo clique abre o documento", ondblclick: () => openFile(x.file_id) },
+    h("div", {}, h("strong", {}, x.rel_path.split("/").pop()),
+      h("span", { class: "muted small" }, `  ${x.kind.toUpperCase()}${x.page ? " · p. " + x.page : ""} · ${fmtDate(x.taken_at)}`)),
+    x.snippet ? snippet(x.snippet) : null);
+}
+
+// Infinite scroll over /api/search: loads PAGE results at a time as the end comes into view.
+// onFirst(response, ms) runs once with the first page (for totals and headers).
+function pagedResults(params, onFirst) {
+  const photos = h("div", { class: "grid photos" });
+  const docs = h("div", { class: "docs" });
+  const sentinel = h("div", { class: "muted sentinel" });
+  const box = h("div", {}, photos, docs, sentinel);
+  let offset = 0;
+  let total = Infinity;
+  let busy = false;
+  const load = async () => {
+    if (busy || offset >= total) return;
+    busy = true;
+    sentinel.textContent = "Carregando…";
+    const q = new URLSearchParams(params);
+    q.set("limit", PAGE);
+    q.set("offset", offset);
+    const t0 = performance.now();
+    try {
+      const r = await api(`/api/search?${q}`);
+      if (offset === 0) onFirst(r, Math.round(performance.now() - t0));
+      total = r.total;
+      offset += r.hits.length;
+      photos.append(...r.hits.filter((x) => x.kind === "image").map(photoCard));
+      docs.append(...r.hits.filter((x) => x.kind !== "image").map(docRow));
+      if (!r.hits.length) total = offset;
+      sentinel.textContent = offset < total ? "" : (total ? `Fim — ${total} resultado(s).` : "Nenhum resultado.");
+    } finally {
+      busy = false;
+    }
+    // Page did not fill the screen yet: keep loading.
+    if (offset < total && sentinel.getBoundingClientRect().top < innerHeight + 400) load();
+  };
+  new IntersectionObserver((entries) => { if (entries.some((e) => e.isIntersecting)) load(); },
+    { rootMargin: "600px" }).observe(sentinel);
+  load();
+  return box;
+}
+
+function searchParams(st) {
+  const q = new URLSearchParams({ text: st.text || "", order: st.order || "date", stickers: !!st.stickers });
+  if (st.from) q.set("date_from", st.from);
+  if (st.to) q.set("date_to", st.to);
+  (st.people || []).forEach((p) => q.append("person", p.id));
+  (st.kinds || []).forEach((k) => q.append("kind", k));
+  return q;
 }
 
 const searchState = { text: "", people: [], from: "", to: "", kinds: [], stickers: false, order: "relevance" };
@@ -300,26 +343,29 @@ async function screenSearch() {
   const out = h("div");
   const chips = h("span", { class: "chips" });
   const run = async () => {
-    const q = new URLSearchParams({ text: st.text, order: st.order, stickers: st.stickers, limit: 120 });
-    if (st.from) q.set("date_from", st.from);
-    if (st.to) q.set("date_to", st.to);
-    st.people.forEach((p) => q.append("person", p.id));
-    st.kinds.forEach((k) => q.append("kind", k));
     if (!st.text.trim() && !st.people.length && !st.from && !st.to && !st.kinds.length) {
-      out.replaceChildren(h("div", { class: "empty" }, "Digite o que procura ou escolha pessoas, período ou tipo."));
+      out.replaceChildren(h("div", { class: "empty" }, "Digite o que procura ou escolha pessoas, período ou tipo. Para navegar por ano ou pessoa, use a aba Fotos."));
       return;
     }
-    out.replaceChildren(h("div", { class: "empty" }, "Buscando…"));
-    const t0 = performance.now();
-    const r = await api(`/api/search?${q}`);
-    const took = `${r.hits.length + r.mentions.length} resultado(s) em ${Math.round(performance.now() - t0)} ms`;
-    if (r.person) {
-      out.replaceChildren(h("p", { class: "muted" }, took),
-        h("h2", {}, `Fotos de ${r.person}`), ...results(r.hits),
-        h("h2", {}, `Documentos e textos que citam ${r.person}`), ...results(r.mentions));
-    } else {
-      out.replaceChildren(h("p", { class: "muted" }, took), ...results(r.hits));
-    }
+    const header = h("div");
+    const list = pagedResults(searchParams(st), (r, ms) => {
+      const parts = [h("p", { class: "muted" }, `${r.total} resultado(s) em ${ms} ms`)];
+      if (r.without_text != null && r.total < r.without_text) {
+        parts.push(h("div", { class: "notice" },
+          `${r.total} combinam com "${st.text}", entre ${r.without_text} arquivos com os filtros escolhidos. `,
+          h("a", { href: "#", onclick: (e) => { e.preventDefault(); st.text = ""; route(); } }, `Ver todos os ${r.without_text}`)));
+      }
+      if (r.person) {
+        parts.push(h("h2", {}, `Fotos de ${r.person}`));
+        if (r.mentions.length) {
+          parts.unshift(h("details", { class: "mentions" },
+            h("summary", {}, `Documentos e textos que citam ${r.person} (${r.mentions.length})`),
+            h("div", { class: "docs" }, r.mentions.map(docRow))));
+        }
+      }
+      header.replaceChildren(...parts);
+    });
+    out.replaceChildren(header, list);
   };
   const drawChips = () => chips.replaceChildren(...st.people.map((p) =>
     h("span", { class: "chip" }, p.name, h("button", { title: "Remover", onclick: () => { st.people = st.people.filter((q) => q.id !== p.id); drawChips(); run(); } }, "×"))));
@@ -349,6 +395,73 @@ async function screenSearch() {
   drawChips();
   run();
   requestAnimationFrame(() => textInput.focus());
+}
+
+const MONTHS = Array.from({ length: 12 }, (_, i) =>
+  new Intl.DateTimeFormat("pt-BR", { month: "long" }).format(new Date(2000, i, 1)));
+const monthName = (ym) => MONTHS[Number(ym.slice(5, 7)) - 1];
+const lastDay = (ym) => new Date(Number(ym.slice(0, 4)), Number(ym.slice(5, 7)), 0).getDate();
+
+// Browsing state survives switching tabs.
+const browseState = { title: "Todas as fotos", people: [], from: "", to: "", stickers: false };
+
+async function screenBrowse() {
+  await refreshPeople();
+  const st = browseState;
+  const main = h("div", { class: "browse-main" });
+  const side = h("aside", { class: "tree" });
+
+  const show = (title, filters) => {
+    Object.assign(st, { title, people: [], from: "", to: "" }, filters);
+    for (const el of side.querySelectorAll(".node.active")) el.classList.remove("active");
+    draw();
+  };
+  const node = (text, count, filters, extraClass = "") => {
+    // Not a link: inside <summary> the same click also expands/collapses the branch.
+    const el = h("span", { role: "button", tabindex: "0", class: `node ${extraClass}`, onclick: () => {
+      show(filters.title || text, filters);
+      el.classList.add("active");
+    } }, h("span", {}, text), h("span", { class: "count" }, count));
+    return el;
+  };
+  const yearNodes = (tree, people, prefix) => tree.years.map((y) =>
+    h("details", {},
+      h("summary", {}, node(y.year, y.count, { title: `${prefix}${y.year}`, people, from: `${y.year}-01-01`, to: `${y.year}-12-31` })),
+      y.months.map((m) => node(monthName(m.month), m.count,
+        { title: `${prefix}${monthName(m.month)} de ${y.year}`, people, from: `${m.month}-01`, to: `${m.month}-${lastDay(m.month)}` }, "month"))));
+
+  const drawTree = async () => {
+    const tree = await api(`/api/tree?stickers=${st.stickers}`);
+    const named = people.filter((p) => p.name && !p.hidden).sort((a, b) => a.name.localeCompare(b.name, "pt-BR"));
+    const personNodes = named.map((p) => {
+      const d = h("details", {}, h("summary", {}, node(p.name, p.files, { title: p.name, people: [p] })));
+      d.addEventListener("toggle", async () => {  // years of this person, fetched on first open
+        if (!d.open || d.dataset.loaded) return;
+        d.dataset.loaded = "1";
+        const t = await api(`/api/tree?person=${p.id}&stickers=${st.stickers}`);
+        d.append(...yearNodes(t, [p], `${p.name} · `));
+      });
+      return d;
+    });
+    side.replaceChildren(
+      node("Todas as fotos", tree.total, { title: "Todas as fotos" }, "all"),
+      h("h3", {}, "Por ano"), ...yearNodes(tree, [], ""),
+      tree.undated ? h("div", { class: "muted small" }, `${tree.undated} sem data`) : null,
+      h("h3", {}, "Por pessoa"),
+      personNodes.length ? personNodes : h("div", { class: "muted small" }, "Dê nome às pessoas na aba Pessoas."),
+      h("label", { class: "small" }, h("input", { type: "checkbox", checked: st.stickers,
+        onchange: (e) => { st.stickers = e.target.checked; drawTree(); draw(); } }), " incluir figurinhas"));
+  };
+
+  const draw = () => {
+    const header = h("div", { class: "toolbar" }, h("h1", {}, st.title));
+    const q = searchParams({ ...st, kinds: ["image"], order: "date" });
+    main.replaceChildren(header, pagedResults(q, (r) => header.append(h("span", { class: "muted" }, `${r.total} foto(s)`))));
+  };
+
+  view.replaceChildren(h("div", { class: "browse" }, side, main));
+  await drawTree();
+  draw();
 }
 
 let indexPoll = null;
@@ -443,6 +556,7 @@ async function route() {
   refreshStatus();
   if (!status.root && page !== "pastas") { location.hash = "#/pastas"; return; }
   if (page === "busca") return screenSearch();
+  if (page === "fotos") return screenBrowse();
   if (page === "pastas") return screenFolders();
   if (page === "pessoa" && arg) return screenPerson(Number(arg));
   if (page === "sugestoes") return screenSuggestions();

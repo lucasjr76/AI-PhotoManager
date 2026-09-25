@@ -135,3 +135,33 @@ progress { width: 100%; height: 12px; }
 .stages td { padding: 2px 16px 2px 0; }
 .stages .num { text-align: right; font-variant-numeric: tabular-nums; }
 .danger { color: var(--danger); }
+
+.notice {
+  background: var(--selected); border-radius: 10px; padding: 10px 14px; margin-bottom: 12px;
+}
+.mentions { margin-bottom: 12px; }
+.mentions summary { cursor: pointer; font-weight: 600; margin-bottom: 8px; }
+.sentinel { text-align: center; padding: 24px; }
+.browse { display: grid; grid-template-columns: 260px 1fr; gap: 20px; align-items: start; }
+.tree {
+  position: sticky; top: 64px; max-height: calc(100vh - 84px); overflow-y: auto;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 10px;
+}
+.tree h3 { font-size: 13px; text-transform: uppercase; color: var(--muted); margin: 14px 4px 6px; }
+.tree details > summary { list-style: none; cursor: pointer; }
+.tree details > summary::-webkit-details-marker { display: none; }
+.tree details > summary .node::before { content: "▸ "; color: var(--muted); }
+.tree details[open] > summary .node::before { content: "▾ "; }
+.tree details > .node, .tree details > details { margin-left: 16px; }
+.node {
+  cursor: pointer;
+  display: flex; justify-content: space-between; gap: 8px; padding: 3px 8px; border-radius: 6px;
+  color: var(--text); text-decoration: none;
+}
+.node:hover { background: var(--selected); }
+.node.active { background: var(--accent); color: #fff; }
+.node.active .count { color: #fff; }
+.node.all { font-weight: 600; }
+.node.month { text-transform: capitalize; }
+.count { color: var(--muted); font-variant-numeric: tabular-nums; }
+.browse-main h1 { margin: 0; }
