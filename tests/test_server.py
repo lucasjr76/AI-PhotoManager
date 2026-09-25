@@ -232,3 +232,18 @@ def test_welcome_open_new_folder_indexes_it(sample_dir: Path) -> None:
 def test_open_folder_rejects_bad_input(body: dict) -> None:  # type: ignore[type-arg]
     c = make_client(None)
     assert c.post("/api/folders/open", json=body).status_code in (400, 404)
+
+
+def test_search_paging_and_tree(db_path: Path) -> None:
+    c = make_client(db_path)
+    first = c.get("/api/search", params={"kind": ["image"], "limit": 2}).json()
+    rest = c.get("/api/search", params={"kind": ["image"], "limit": 2, "offset": 2}).json()
+    assert first["total"] == rest["total"] == 3  # 3 non-sticker images indexed without error
+    seen = [h["file_id"] for h in first["hits"] + rest["hits"]]
+    assert len(seen) == len(set(seen)) == 3
+
+    tree = c.get("/api/tree").json()
+    assert tree["total"] == 3
+    assert [y["year"] for y in tree["years"]] == ["2023", "2022", "2019"]
+    assert tree["years"][0]["months"] == [{"month": "2023-05", "count": 1}]
+    assert c.get("/api/tree", params={"stickers": True}).json()["total"] == 4

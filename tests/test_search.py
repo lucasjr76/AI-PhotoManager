@@ -131,3 +131,38 @@ def test_no_text_lists_filtered_files(conn: sqlite3.Connection) -> None:
 def test_user_text_is_never_fts_syntax(conn: sqlite3.Connection) -> None:
     assert fts_query('a "b" OR c*') == '"a" """b""" "OR" "c*"'
     assert search(conn, Query(text='AND OR "( NEAR'), None).hits == []
+
+
+def test_paging_covers_everything_once(conn: sqlite3.Connection) -> None:
+    full = search(conn, Query(text="praia", limit=100), fake_encoder)
+    pages = [
+        search(conn, Query(text="praia", limit=1, offset=i), fake_encoder)
+        for i in range(full.total + 1)
+    ]
+    assert all(p.total == full.total == 4 for p in pages)
+    assert [h.rel_path for p in pages for h in p.hits] == paths(full.hits)
+    assert pages[-1].hits == []
+
+
+def test_paging_without_text(conn: sqlite3.Connection) -> None:
+    first = search(conn, Query(limit=2), None)
+    second = search(conn, Query(limit=2, offset=2), None)
+    assert first.total == second.total == 6  # every done, non-sticker file
+    assert not set(paths(first.hits)) & set(paths(second.hits))
+
+
+def test_text_narrowing_people_reports_count_without_text(conn: sqlite3.Connection) -> None:
+    maria = conn.execute("SELECT id FROM people WHERE name = 'Maria Souza'").fetchone()[0]
+    narrowed = search(conn, Query(text="bolo", people_ids=(maria,)), fake_encoder)
+    assert narrowed.without_text == 2  # praia1 and praia2 have Maria
+    assert narrowed.total < narrowed.without_text
+    assert search(conn, Query(text="bolo"), fake_encoder).without_text is None
+
+
+def test_date_counts(conn: sqlite3.Connection) -> None:
+    from aipdm.core.search import date_counts
+
+    months = dict(date_counts(conn, Query(kinds=("image",))))
+    assert months == {"2023-06": 1, "2023-03": 1, "2023-01": 1, "2022-12": 1}
+    maria = conn.execute("SELECT id FROM people WHERE name = 'Maria Souza'").fetchone()[0]
+    assert dict(date_counts(conn, Query(), (maria,))) == {"2023-06": 1, "2023-01": 1}

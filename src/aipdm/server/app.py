@@ -340,6 +340,7 @@ def create_app(
         stickers: bool = False,
         order: str = "relevance",
         limit: int = 120,
+        offset: int = 0,
         c: sqlite3.Connection = Conn,
     ) -> dict[str, object]:
         if text.strip():
@@ -355,12 +356,40 @@ def create_app(
             stickers=stickers,
             order="date" if order == "date" else "relevance",
             limit=max(1, min(limit, 500)),
+            offset=max(0, offset),
         )
         results = searching.search(c, query, state.encoder)
         return {
+            "total": results.total,
+            "without_text": results.without_text,
             "person": results.person,
             "hits": [asdict(h) for h in results.hits],
             "mentions": [asdict(h) for h in results.mentions],
+        }
+
+    @app.get("/api/tree")
+    def tree(
+        person: list[int] = Query(default=[]),  # noqa: B008
+        stickers: bool = False,
+        c: sqlite3.Connection = Conn,
+    ) -> dict[str, object]:
+        """Photo counts by year and month (optionally for some people), for browsing."""
+        counts = searching.date_counts(
+            c, searching.Query(kinds=("image",), stickers=stickers), tuple(person)
+        )
+        years: dict[str, dict[str, object]] = {}
+        undated = 0
+        for ym, n in counts:
+            if ym is None:
+                undated = n
+                continue
+            year = years.setdefault(ym[:4], {"year": ym[:4], "count": 0, "months": []})
+            year["count"] = int(year["count"]) + n  # type: ignore[call-overload]
+            year["months"].append({"month": ym, "count": n})  # type: ignore[attr-defined]
+        return {
+            "total": sum(n for _, n in counts),
+            "undated": undated,
+            "years": list(years.values()),
         }
 
     # --- folders and indexing -------------------------------------------------
