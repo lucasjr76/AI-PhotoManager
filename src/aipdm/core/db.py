@@ -29,6 +29,35 @@ MIGRATIONS: tuple[str, ...] = (
       tokenize = 'unicode61 remove_diacritics 2'
     );
     """,
+    """
+    CREATE TABLE people (
+      id INTEGER PRIMARY KEY,
+      name TEXT,
+      hidden INTEGER DEFAULT 0,
+      cover_face_id INTEGER
+    );
+    CREATE TABLE faces (
+      id INTEGER PRIMARY KEY,
+      file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+      bbox TEXT NOT NULL,
+      det_score REAL NOT NULL,
+      embedding BLOB NOT NULL,
+      person_id INTEGER REFERENCES people(id),
+      assign_source TEXT,
+      assign_score REAL
+    );
+    CREATE INDEX faces_person ON faces(person_id);
+    CREATE INDEX faces_file ON faces(file_id);
+    CREATE TABLE face_negatives (
+      face_id INTEGER NOT NULL REFERENCES faces(id) ON DELETE CASCADE,
+      person_id INTEGER NOT NULL REFERENCES people(id) ON DELETE CASCADE,
+      PRIMARY KEY (face_id, person_id)
+    );
+    CREATE TABLE clip_embeddings (
+      file_id INTEGER PRIMARY KEY REFERENCES files(id) ON DELETE CASCADE,
+      embedding BLOB NOT NULL
+    );
+    """,
 )
 
 
