@@ -10,6 +10,7 @@ import os
 import sqlite3
 import subprocess
 import sys
+import threading
 from collections.abc import Awaitable, Callable, Iterator
 from pathlib import Path
 
@@ -73,7 +74,7 @@ def create_app(db_path: Path, token: str, allowed_host: str) -> FastAPI:
         return await call_next(request)
 
     def conn() -> Iterator[sqlite3.Connection]:
-        c = db.connect(db_path)
+        c = db.connect(db_path, cross_thread=True)
         try:
             yield c
         finally:
@@ -236,7 +237,10 @@ def create_app(db_path: Path, token: str, allowed_host: str) -> FastAPI:
             face = img.crop((x - margin, y - margin, x + w + margin, y + h + margin))
             face.thumbnail((CROP_SIZE, CROP_SIZE))
             faces_dir.mkdir(parents=True, exist_ok=True)
-            face.save(cached, "JPEG", quality=85)
+            # Write-then-rename: parallel requests for the same face never see half a file.
+            tmp = cached.with_suffix(f".{threading.get_ident()}.tmp")
+            face.save(tmp, "JPEG", quality=85)
+            tmp.replace(cached)
         return FileResponse(cached, media_type="image/jpeg")
 
     @app.get("/api/files/{file_id}/thumb")

@@ -119,13 +119,15 @@ async function screenPerson(id) {
   await refreshPeople();
   const p = await api(`/api/people/${id}`);
   const selected = new Set();
-  const nameInput = h("input", { type: "text", value: p.name || "", placeholder: "Nome desta pessoa", list: "people-names" });
+  const nameInput = h("input", { type: "text", class: "name-field", value: p.name || "", placeholder: "Nome desta pessoa", list: "people-names" });
   const moveInput = h("input", { type: "text", placeholder: "Nome ou #id de destino", list: "people-names" });
   const mergeInput = h("input", { type: "text", placeholder: "Mesclar com (nome ou #id)", list: "people-names" });
   const selInfo = h("span", { class: "muted" });
   const selBar = h("div", { class: "toolbar sticky" });
 
-  const save = async () => {
+  // Next unnamed, visible group (the API lists them largest first): fast naming.
+  const nextUnnamed = () => people.find((q) => !q.name && !q.hidden && q.id !== p.id);
+  const save = async (goNext = false) => {
     const name = nameInput.value.trim();
     const other = name && people.find((q) => q.id !== p.id && q.name && q.name.toLowerCase() === name.toLowerCase());
     if (other && confirm(`Já existe "${other.name}". Juntar as duas pessoas?`)) {
@@ -135,10 +137,13 @@ async function screenPerson(id) {
       return;
     }
     await api(`/api/people/${p.id}`, { name });
-    toast("Nome salvo");
+    toast(name ? `Salvo: ${name}` : "Nome removido");
     refreshStatus();
+    const next = goNext && nextUnnamed();
+    if (next) location.hash = `#/pessoa/${next.id}`;
   };
-  nameInput.addEventListener("keydown", (e) => { if (e.key === "Enter") save(); });
+  // Enter = save and jump to the next unnamed group.
+  nameInput.addEventListener("keydown", (e) => { if (e.key === "Enter") save(true); });
 
   const onSelection = () => {
     selInfo.textContent = selected.size ? `${selected.size} selecionado(s)` : "Clique nos rostos que não são desta pessoa";
@@ -176,14 +181,18 @@ async function screenPerson(id) {
   view.replaceChildren(
     h("p", {}, h("a", { href: "#/pessoas" }, "← Pessoas")),
     h("div", { class: "toolbar" },
-      nameInput, h("button", { class: "primary", onclick: save }, "Salvar nome"),
+      nameInput,
+      h("button", { class: "primary", onclick: () => save(true), title: "Enter" }, "Salvar e ir para o próximo sem nome"),
+      h("button", { onclick: () => save(false) }, "Salvar"),
+      nextUnnamed() ? h("button", { onclick: () => { location.hash = `#/pessoa/${nextUnnamed().id}`; } }, "Pular") : null,
       h("button", { onclick: async () => { await api(`/api/people/${p.id}`, { hidden: !p.hidden }); toast(p.hidden ? "Pessoa visível" : "Pessoa oculta"); route(); } },
         p.hidden ? "Mostrar pessoa" : "Ocultar pessoa"),
       mergeInput, h("button", { onclick: merge }, "Mesclar aqui")),
-    h("p", { class: "muted" }, `${p.faces.length} rostos. Duplo clique abre a foto original.`),
+    h("p", { class: "muted" }, `${p.faces.length} rostos. Digite o nome e tecle Enter para ir ao próximo grupo sem nome. Clique nos rostos que não são desta pessoa para corrigir; duplo clique abre a foto.`),
     selBar, gridBox);
   draw();
-  nameInput.focus();
+  // After the view is in the DOM and painted, so the field really gets the cursor.
+  requestAnimationFrame(() => { nameInput.focus(); nameInput.select(); });
 }
 
 async function screenSuggestions() {

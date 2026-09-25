@@ -14,7 +14,8 @@ from aipdm.server.app import create_app
 TITLE = "AI-PhotoDocsManager"
 
 
-def serve(db_path: Path, *, browser: bool = False) -> None:
+def start(db_path: Path) -> tuple[str, str, uvicorn.Server, threading.Thread]:
+    """Start serving in a background thread. Returns (base url, token, server, thread)."""
     token = secrets.token_urlsafe(32)
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.bind(("127.0.0.1", 0))  # loopback only, port chosen by the OS
@@ -25,7 +26,12 @@ def serve(db_path: Path, *, browser: bool = False) -> None:
     thread.start()
     while not server.started:
         time.sleep(0.05)
-    url = f"http://127.0.0.1:{port}/?t={token}"
+    return f"http://127.0.0.1:{port}", token, server, thread
+
+
+def serve(db_path: Path, *, browser: bool = False) -> None:
+    base, token, server, thread = start(db_path)
+    url = f"{base}/?t={token}"
     try:
         if browser:
             webbrowser.open(url)

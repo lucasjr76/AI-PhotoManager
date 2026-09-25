@@ -98,3 +98,5 @@ button:disabled { opacity: .5; cursor: default; }
   opacity: 0; transition: opacity .2s; pointer-events: none;
 }
 #toast.show { opacity: .95; }
+
+input.name-field { min-width: 380px; font-size: 17px; font-weight: 600; }

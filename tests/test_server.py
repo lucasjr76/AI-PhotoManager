@@ -144,3 +144,26 @@ def test_people_flow(client: TestClient) -> None:
     client.post(f"/api/people/{person['id']}", json={"hidden": True})
     assert client.get("/api/people").json() == []
     assert len(client.get("/api/people?hidden=true").json()) == 1
+
+
+def test_real_server_handles_parallel_requests(db_path: Path) -> None:
+    """Many image requests at once, as the people grid does, through real uvicorn threads."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    import httpx
+
+    from aipdm.server.run import start
+
+    base, token, server, thread = start(db_path)
+    try:
+        conn = sqlite3.connect(db_path)
+        face_ids = [r[0] for r in conn.execute("SELECT id FROM faces")]
+        conn.close()
+        urls = [f"{base}/api/faces/{face_ids[i % len(face_ids)]}/crop" for i in range(200)]
+        urls += [f"{base}/api/people"] * 50 + [f"{base}/api/status"] * 50
+        with httpx.Client(headers={"X-Token": token}) as http, ThreadPoolExecutor(16) as pool:
+            codes = list(pool.map(lambda u: http.get(u).status_code, urls))
+        assert codes == [200] * len(urls)
+    finally:
+        server.should_exit = True
+        thread.join(timeout=5)

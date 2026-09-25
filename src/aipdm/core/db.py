@@ -61,9 +61,12 @@ MIGRATIONS: tuple[str, ...] = (
 )
 
 
-def connect(path: Path) -> sqlite3.Connection:
+def connect(path: Path, *, cross_thread: bool = False) -> sqlite3.Connection:
+    """`cross_thread`: the connection may be closed by another thread than the one that
+    opened it (FastAPI runs a dependency's setup and teardown on different pool threads).
+    It must still be used by one thread at a time."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(path)
+    conn = sqlite3.connect(path, check_same_thread=not cross_thread)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
