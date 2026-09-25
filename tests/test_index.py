@@ -282,3 +282,34 @@ def test_indexed_folder_gets_only_gps(sample_dir: Path, db_path: Path, places_di
     assert stats.processed == 5  # the 5 good images; the broken one stays in error
     assert "decode" not in stats.stage_seconds and "hash" not in stats.stage_seconds
     assert rows(db_path)["praia.jpg"]["city"] == "Curitiba"
+
+
+def test_pending_changes_is_read_only_and_matches_scan(sample_dir: Path, db_path: Path) -> None:
+    from aipdm.core.scanner import pending_changes
+
+    index(sample_dir, db_path, workers=1)
+    conn = db.connect(db_path)
+    assert pending_changes(conn, sample_dir) == frozenset()
+
+    (sample_dir / "nova.txt").write_text("oi")
+    (sample_dir / "camera.jpg").unlink()
+    target = sample_dir / "WhatsApp Documents" / "relatorio.docx"
+    st = target.stat()
+    os.utime(target, ns=(st.st_atime_ns, st.st_mtime_ns + 10**9))
+    before = conn.execute("SELECT COUNT(*), SUM(status = 'missing') FROM files").fetchone()
+    changes = pending_changes(conn, sample_dir)
+    assert {c[0] for c in changes} == {
+        "nova.txt",
+        "camera.jpg",
+        "WhatsApp Documents/relatorio.docx",
+    }
+    assert ("camera.jpg", -1, 0.0) in changes
+    assert tuple(
+        conn.execute("SELECT COUNT(*), SUM(status = 'missing') FROM files").fetchone()
+    ) == tuple(before)
+    conn.close()
+
+    index(sample_dir, db_path, workers=1)
+    conn = db.connect(db_path)
+    assert pending_changes(conn, sample_dir) == frozenset()  # scan absorbed exactly those
+    conn.close()

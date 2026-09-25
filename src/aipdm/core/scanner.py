@@ -131,6 +131,31 @@ def in_hidden_folder(rel_path: str) -> bool:
     return any(part.startswith(".") for part in rel_path.split("/")[:-1])
 
 
+def pending_changes(conn: sqlite3.Connection, root: Path) -> frozenset[tuple[str, int, float]]:
+    """Read-only: files that `scan` would pick up (new, changed, gone, back).
+
+    Returns their (rel_path, size, mtime) — gone files as (rel_path, -1, 0). Comparing two
+    results tells whether the folder is still changing (a copy in progress).
+    """
+    known = {
+        rel: (size, mtime, status)
+        for rel, size, mtime, status in conn.execute(
+            "SELECT rel_path, size, mtime, status FROM files"
+        )
+    }
+    changes: set[tuple[str, int, float]] = set()
+    seen: set[str] = set()
+    for rel, size, mtime in walk(root):
+        seen.add(rel)
+        row = known.get(rel)
+        if row is None or row[0] != size or row[1] != mtime or row[2] == "missing":
+            changes.add((rel, size, mtime))
+    for rel, (_, _, status) in known.items():
+        if rel not in seen and status != "missing" and not in_hidden_folder(rel):
+            changes.add((rel, -1, 0.0))
+    return frozenset(changes)
+
+
 def scan(conn: sqlite3.Connection, root: Path, *, force: bool = False) -> ScanStats:
     """Sync the files table with the folder. New/changed files become 'pending'."""
     stats = ScanStats()

@@ -6,6 +6,7 @@ files are only ever served by database id, never by a client-supplied path.
 """
 
 import hmac
+import logging
 import os
 import re
 import sqlite3
@@ -27,6 +28,8 @@ from aipdm.core import db, faces, paths, scanner
 from aipdm.core import search as searching
 from aipdm.core.images import load_image
 from aipdm.core.paths import thumbs_dir_for
+
+log = logging.getLogger(__name__)
 
 UI_DIR = Path(__file__).resolve().parents[1] / "ui"
 UI_FILES = {"/": "index.html", "/app.js": "app.js", "/style.css": "style.css"}
@@ -72,10 +75,26 @@ class IndexJob:
     stop: threading.Event = field(default_factory=threading.Event, repr=False)
 
 
+class MonitorSwitch(BaseModel):
+    enabled: bool
+
+
+@dataclass
+class Monitor:
+    """Periodic check of the open folder (SPEC backlog: "monitoramento da pasta")."""
+
+    last_check: float | None = None
+    changes: int = 0
+    # Changes seen on the previous check. Indexing starts only when two checks in a row
+    # see the same changes: the folder has settled (no copy/sync in progress).
+    pending: frozenset[tuple[str, int, float]] | None = None
+
+
 @dataclass
 class State:
     db: Path | None
     job: IndexJob | None = None
+    monitor: Monitor = field(default_factory=Monitor)
     encoder: searching.TextEncoder | None = None
     lock: threading.Lock = field(default_factory=threading.Lock)
 
@@ -97,6 +116,7 @@ def create_app(
     encoder_factory: Callable[[], searching.TextEncoder | None] = default_encoder,
     index_only: frozenset[str] | None = None,
     workers: int | None = None,
+    monitor_interval: float | None = 60.0,
 ) -> FastAPI:
     """`db_path` None: no folder yet (welcome screen). The keyword arguments exist for tests."""
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
@@ -444,6 +464,7 @@ def create_app(
         with state.lock:
             if state.job and state.job.running:
                 raise HTTPException(409, "aguarde a indexação atual terminar")
+            state.monitor = Monitor()  # pending changes belonged to the previous folder
             if body.id is not None:
                 if (
                     not DB_ID.match(body.id)
@@ -531,5 +552,65 @@ def create_app(
         if job.running:
             data["seconds"] = time.time() - job.started
         return data
+
+    # --- folder monitoring ----------------------------------------------------
+
+    def monitor_enabled(c: sqlite3.Connection) -> bool:
+        return db.get_meta(c, "monitor") != "0"  # on unless the user turned it off
+
+    def monitor_tick() -> None:
+        """One check; the background thread calls it every `monitor_interval` seconds."""
+        target, mon = state.db, state.monitor
+        if target is None or (state.job and state.job.running):
+            return
+        c = db.connect(target, cross_thread=True)
+        try:
+            root = root_of(c)
+            if not monitor_enabled(c) or not root.is_dir():
+                return
+            changes = scanner.pending_changes(c, root)
+        finally:
+            c.close()
+        mon.last_check, mon.changes = time.time(), len(changes)
+        if not changes:
+            mon.pending = None
+        elif changes == mon.pending:
+            with state.lock:
+                if state.db == target and not (state.job and state.job.running):
+                    _start_index(root, force=False)
+            mon.pending = None
+        else:
+            mon.pending = changes
+
+    app.state.monitor_tick = monitor_tick  # tests drive it without the thread
+    app.state.monitor_stop = stop_monitor = threading.Event()
+
+    if monitor_interval:
+
+        def monitor_loop() -> None:
+            while not stop_monitor.wait(monitor_interval):
+                try:
+                    monitor_tick()
+                except Exception:  # a failed check must not kill monitoring
+                    log.exception("falha ao verificar a pasta")
+
+        threading.Thread(target=monitor_loop, daemon=True, name="aipdm-monitor").start()
+
+    @app.get("/api/monitor")
+    def monitor(c: sqlite3.Connection = Conn) -> dict[str, object]:
+        mon = state.monitor
+        return {
+            "enabled": monitor_enabled(c),
+            "interval": monitor_interval,
+            "last_check": mon.last_check,
+            "changes": mon.changes,
+            "waiting": mon.pending is not None,
+        }
+
+    @app.post("/api/monitor")
+    def set_monitor(body: MonitorSwitch, c: sqlite3.Connection = Conn) -> dict[str, object]:
+        db.set_meta(c, "monitor", "1" if body.enabled else "0")
+        c.commit()
+        return monitor(c)
 
     return app

@@ -8,6 +8,7 @@ import numpy as np
 import pytest
 from conftest import index_base
 from fastapi.testclient import TestClient
+from PIL import Image
 from starlette.routing import Route
 
 from aipdm.core import db
@@ -40,7 +41,7 @@ def db_path(sample_dir: Path, tmp_path: Path) -> Path:
 
 @pytest.fixture
 def app_(db_path: Path):  # type: ignore[no-untyped-def]
-    return create_app(db_path, TOKEN, allowed_host=HOST)
+    return create_app(db_path, TOKEN, allowed_host=HOST, monitor_interval=None)
 
 
 @pytest.fixture
@@ -174,6 +175,7 @@ def fake_encoder(_text: str) -> np.ndarray:
 
 
 def make_client(db: Path | None, **kw: object) -> TestClient:
+    kw.setdefault("monitor_interval", None)
     app = create_app(db, TOKEN, HOST, encoder_factory=lambda: fake_encoder, **kw)  # type: ignore[arg-type]
     c = TestClient(app, base_url=f"http://{HOST}")
     c.get(f"/?t={TOKEN}", follow_redirects=False)
@@ -275,3 +277,67 @@ def test_places_tree(db_path: Path) -> None:
     assert [h["place"] for h in got["hits"]] == ["Florianópolis, Santa Catarina, Brazil"]
     assert c.get("/api/search", params={"state": "Santa Catarina"}).json()["total"] == 1
     assert c.get("/api/search", params={"state": "Paraná"}).json()["total"] == 0
+
+
+def test_monitor_indexes_new_files_once_they_settle(sample_dir: Path) -> None:
+    c = make_client(None, index_only=frozenset(), workers=1)
+    tick = c.app.state.monitor_tick  # type: ignore[attr-defined]
+    c.post("/api/folders/open", json={"path": str(sample_dir)})
+    wait_index(c)
+    tick()
+    assert c.get("/api/monitor").json()["changes"] == 0
+
+    new = sample_dir / "nova.jpg"
+    Image.new("RGB", (20, 20), "red").save(new)
+    tick()  # first sighting: wait for the folder to settle
+    status = c.get("/api/monitor").json()
+    assert status["changes"] == 1 and status["waiting"]
+    assert c.get("/api/index").json()["summary"]["processed"] == 7  # nothing new ran yet
+
+    with new.open("ab") as fh:  # still being copied: size changed since last check
+        fh.write(b"\0" * 10)
+    tick()
+    assert c.get("/api/monitor").json()["waiting"]
+    assert c.get("/api/index").json()["summary"]["processed"] == 7
+
+    tick()  # same as last check: settled -> index
+    assert wait_index(c)["summary"]["processed"] == 1
+    tick()
+    assert c.get("/api/monitor").json() | {"last_check": None} == {
+        "enabled": True,
+        "interval": None,
+        "last_check": None,
+        "changes": 0,
+        "waiting": False,
+    }
+
+
+def test_monitor_can_be_turned_off(sample_dir: Path) -> None:
+    c = make_client(None, index_only=frozenset(), workers=1)
+    tick = c.app.state.monitor_tick  # type: ignore[attr-defined]
+    c.post("/api/folders/open", json={"path": str(sample_dir)})
+    wait_index(c)
+    assert c.post("/api/monitor", json={"enabled": False}).json()["enabled"] is False
+    Image.new("RGB", (20, 20)).save(sample_dir / "nova.jpg")
+    tick()
+    tick()
+    assert c.get("/api/index").json()["summary"]["processed"] == 7  # not re-indexed
+    assert c.post("/api/monitor", json={"enabled": True}).json()["enabled"] is True
+
+
+def test_monitor_thread_runs_by_itself(sample_dir: Path) -> None:
+    import time
+
+    c = make_client(None, index_only=frozenset(), workers=1, monitor_interval=0.05)
+    try:
+        c.post("/api/folders/open", json={"path": str(sample_dir)})
+        wait_index(c)
+        Image.new("RGB", (20, 20)).save(sample_dir / "nova.jpg")
+        for _ in range(200):
+            status = c.get("/api/index").json()
+            if not status["running"] and status["summary"]["scan"]["new"] == 1:
+                break
+            time.sleep(0.05)
+        assert c.get("/api/index").json()["summary"]["processed"] == 1
+    finally:
+        c.app.state.monitor_stop.set()  # type: ignore[attr-defined]

@@ -94,6 +94,10 @@ Figurinhas do WhatsApp (`STK-*.webp`) são indexadas com `is_sticker=1` e ficam 
 
 Gravar `date_source` para depuração. Datas fora de 1990..hoje+1 dia são descartadas e passa-se à próxima fonte.
 
+## 6.1 Localização
+
+Estágio `gps` (imagens): latitude/longitude do bloco GPS do EXIF (JPEG, HEIC); inválidos e (0,0) são descartados. Pastas já indexadas recebem só esse estágio, lendo apenas o cabeçalho. Após a indexação, o processo principal nomeia o lugar pela cidade mais próxima da base GeoNames `cities500` (CC-BY 4.0, ~236 mil lugares, `models/places.tsv.gz` gerado por `tools/fetch_models.py`), até 60 km; mais longe fica sem lugar (string vazia, não é refeito). O rótulo "Cidade, Estado, País" entra no FTS (página 0), então a busca por texto encontra lugares. Países vêm em inglês (GeoNames). Sem mapa (tiles offline ficam para depois).
+
 ## 7. Schema SQLite (base; ajustar com migração versionada)
 
 ```sql
@@ -147,6 +151,8 @@ CREATE VIRTUAL TABLE texts USING fts5(
 
 Índices em `files(taken_at)`, `files(status)`, `faces(person_id)`, `faces(file_id)`.
 
+Migrações: v1 (files, meta, texts), v2 (people, faces, face_negatives, clip_embeddings), v3 (`files.lat, lon, city, state, country` + índice por lugar).
+
 ## 8. Pipeline de indexação
 
 1. **Scan:** percorre a raiz (segue symlinks: não; **pastas ocultas** — nome iniciado por `.`, ex. `.Links`, `.Statuses` — são ignoradas e, se já estiverem no banco, removidas dele), compara `size+mtime` com o banco; novos/alterados → `pending`; ausentes → `missing` (não apaga, permite reaparecer).
@@ -199,6 +205,8 @@ aipdm ui [pasta] [--browser]                      # interface (fase 3); --browse
 aipdm faces regroup                               # refaz grupos sem nome com os limiares atuais
 ```
 
+**Monitoramento:** com a interface aberta, a pasta atual é verificada a cada 60 s só lendo (comparação de tamanho/mtime com o banco). A indexação incremental só começa quando duas verificações seguidas veem as mesmas mudanças (cópia/sincronização terminou). Pode ser desligado por pasta (`meta.monitor = 0`). Verificação periódica em vez de inotify/watchdog: sem dependência, funciona igual em Linux/Windows, pen drive e disco de rede.
+
 **Re-scan:** rodar `aipdm index` de novo na mesma pasta re-varre e processa só o que mudou (novos, alterados, ausentes). `--force` reprocessa todos os arquivos. Na UI (fase 3), botão "Re-escanear pasta" com o mesmo comportamento.
 
 `status` e `search` sem `--db` usam o banco indexado mais recentemente.
@@ -242,7 +250,7 @@ Diretório de dados: Linux `~/.local/share/ai-photodocsmanager/`, Windows `%LOCA
 - ✅ Instala e roda em máquina limpa Windows 11 e Ubuntu/Zorin sem Python instalado, sem acesso à rede.
 
 **Fase 5 — Refinamentos (backlog)**
-- monitoramento da pasta, cifragem do banco (SQLCipher), vídeos (frame-chave), busca por local se houver GPS, exportar resultado para pasta.
+- ~~monitoramento da pasta~~ (feito), ~~busca por local se houver GPS~~ (feito, sem mapa), cifragem do banco (SQLCipher), vídeos (frame-chave), exportar resultado para pasta, mapa offline.
 
 ## 14. Fora de escopo
 

@@ -56,4 +56,5 @@ def serve(db_path: Path | None, *, browser: bool = False) -> None:
         pass
     finally:
         server.should_exit = True
+        server.config.app.state.monitor_stop.set()
         thread.join(timeout=5)

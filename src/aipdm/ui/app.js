@@ -516,8 +516,27 @@ function indexPanel(job) {
     Object.keys(s.stage_seconds).length ? stageTable(s.stage_seconds) : null);
 }
 
+function ago(ts) {
+  if (!ts) return "ainda não verificada";
+  const s = Math.max(0, Math.round(Date.now() / 1000 - ts));
+  return s < 60 ? `há ${s} s` : `há ${Math.round(s / 60)} min`;
+}
+
+function monitorPanel(m) {
+  const toggle = h("input", { type: "checkbox", checked: m.enabled, onchange: async (e) => {
+    await api("/api/monitor", { enabled: e.target.checked });
+    toast(e.target.checked ? "Monitoramento ligado" : "Monitoramento desligado");
+    route();
+  } });
+  const detail = !m.enabled ? "Desligado: use Re-escanear quando quiser atualizar."
+    : m.waiting ? `${m.changes} mudança(s) encontrada(s); aguardando a cópia terminar para indexar.`
+    : `Verifica a pasta a cada ${Math.round(m.interval || 60)} s enquanto o app está aberto. Última verificação: ${ago(m.last_check)}.`;
+  return h("div", { class: "toolbar" }, h("label", {}, toggle, " Monitorar esta pasta"), h("span", { class: "muted" }, detail));
+}
+
 async function screenFolders() {
   const [status, folders, job] = await Promise.all([api("/api/status"), api("/api/folders"), api("/api/index")]);
+  const monitor = status.root ? await api("/api/monitor") : null;
   const panel = h("div");
   const drawJob = (j) => put(panel, indexPanel(j));
   const poll = () => {
@@ -553,6 +572,7 @@ async function screenFolders() {
         h("button", { class: "primary", onclick: () => reindex(false), disabled: job.running }, "Re-escanear pasta"),
         h("button", { onclick: () => reindex(true), disabled: job.running }, "Reprocessar tudo")),
       h("p", { class: "muted" }, "Re-escanear processa só o que foi adicionado ou mudou. A pasta nunca é alterada."),
+      monitorPanel(monitor),
       panel)
       : h("div", {}, h("h1", {}, "Bem-vindo"),
         h("p", {}, "Escolha a pasta com suas fotos e documentos (por exemplo, o backup do WhatsApp). Ela é só lida, nunca alterada, e tudo roda neste computador, sem internet.")),
@@ -588,6 +608,21 @@ async function route() {
   if (page === "pessoas") return screenPeople();
   location.hash = status.root ? "#/busca" : "#/pastas";
 }
+
+// Indexing can start by itself (folder monitoring): show it in the header on every screen.
+setInterval(async () => {
+  const job = await api("/api/index").catch(() => null);
+  const el = document.getElementById("indexing");
+  if (job && job.running) {
+    el.textContent = job.total ? `⟳ Indexando ${job.done}/${job.total}` : "⟳ Verificando a pasta…";
+    el.dataset.running = "1";
+  } else if (el.dataset.running) {
+    delete el.dataset.running;
+    el.textContent = "";
+    toast("Indexação concluída");
+    refreshStatus();
+  }
+}, 3000);
 
 window.addEventListener("hashchange", route);
 route();
