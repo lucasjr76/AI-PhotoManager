@@ -7,7 +7,18 @@ import numpy as np
 import pytest
 
 from aipdm.core import db
-from aipdm.core.faces import DetectedFace, FaceSettings, group_faces, normalize, reset_groups
+from aipdm.core.faces import (
+    DetectedFace,
+    FaceSettings,
+    assign_face_to_new_person,
+    group_faces,
+    merge_people,
+    name_person,
+    normalize,
+    remove_face,
+    reset_groups,
+    set_hidden,
+)
 from aipdm.core.scanner import _save_faces
 
 SETTINGS = FaceSettings(t_auto=0.8, t_suggest=0.6, cluster_eps=0.1, cluster_min_samples=3)
@@ -168,3 +179,32 @@ def test_reset_groups_keeps_names_and_user_decisions(conn: sqlite3.Connection) -
     assert person_of(conn, auto) == (None, None)  # automatic assignment undone
     assert person_of(conn, other[0]) == (None, None)  # unnamed group undone
     assert person_of(conn, other[1]) == (unnamed, "user")  # user decision kept
+
+
+def test_user_actions(conn: sqlite3.Connection) -> None:
+    group = [add_face(conn, near(IDENTITIES[0], 0.99)) for _ in range(4)]
+    group_faces(conn, SETTINGS)
+    person = person_of(conn, group[0])[0]
+    assert person is not None
+
+    name_person(conn, person, "  Maria  ")
+    assert conn.execute("SELECT name FROM people WHERE id = ?", (person,)).fetchone()[0] == "Maria"
+
+    remove_face(conn, group[0])  # "não é a Maria"
+    assert person_of(conn, group[0]) == (None, None)
+    group_faces(conn, SETTINGS)
+    assert person_of(conn, group[0])[0] != person  # negative respected on regroup
+
+    ana = assign_face_to_new_person(conn, group[0], "Ana")
+    assert person_of(conn, group[0]) == (ana, "user")
+
+    merge_people(conn, person, ana)
+    assert person_of(conn, group[0]) == (person, "user")
+    assert conn.execute("SELECT COUNT(*) FROM people WHERE id = ?", (ana,)).fetchone()[0] == 0
+    # assigning back removes the old veto for that pair
+    assert conn.execute("SELECT COUNT(*) FROM face_negatives").fetchone()[0] == 0
+
+    set_hidden(conn, person, True)
+    assert conn.execute("SELECT hidden FROM people WHERE id = ?", (person,)).fetchone()[0] == 1
+    with pytest.raises(ValueError):
+        merge_people(conn, person, person)

@@ -231,3 +231,78 @@ def _negative_cells(
         for f, p in conn.execute("SELECT face_id, person_id FROM face_negatives")
         if f in row_of and p in col_of
     ]
+
+
+# --- User actions. Every one of them is final: automatic grouping never undoes them. ---
+
+
+def name_person(conn: sqlite3.Connection, person_id: int, name: str | None) -> None:
+    conn.execute(
+        "UPDATE people SET name = ? WHERE id = ?", ((name or "").strip() or None, person_id)
+    )
+    conn.commit()
+
+
+def set_hidden(conn: sqlite3.Connection, person_id: int, hidden: bool) -> None:
+    conn.execute("UPDATE people SET hidden = ? WHERE id = ?", (int(hidden), person_id))
+    conn.commit()
+
+
+def merge_people(conn: sqlite3.Connection, keep: int, gone: int) -> None:
+    """Move everything from `gone` into `keep` and delete `gone`."""
+    if keep == gone:
+        raise ValueError("não é possível mesclar uma pessoa com ela mesma")
+    conn.execute("UPDATE faces SET person_id = ? WHERE person_id = ?", (keep, gone))
+    conn.execute(
+        "UPDATE OR IGNORE face_negatives SET person_id = ? WHERE person_id = ?", (keep, gone)
+    )
+    conn.execute("DELETE FROM face_negatives WHERE person_id = ?", (gone,))
+    # A face now inside `keep` can no longer be vetoed for `keep`.
+    conn.execute(
+        "DELETE FROM face_negatives WHERE person_id = ?"
+        " AND face_id IN (SELECT id FROM faces WHERE person_id = ?)",
+        (keep, keep),
+    )
+    conn.execute("DELETE FROM people WHERE id = ?", (gone,))
+    conn.commit()
+
+
+def assign_face(conn: sqlite3.Connection, face_id: int, person_id: int) -> None:
+    """User says: this face is `person_id` (also confirms a suggestion)."""
+    conn.execute(
+        "UPDATE faces SET person_id = ?, assign_source = 'user', assign_score = NULL WHERE id = ?",
+        (person_id, face_id),
+    )
+    conn.execute(
+        "DELETE FROM face_negatives WHERE face_id = ? AND person_id = ?", (face_id, person_id)
+    )
+    conn.commit()
+
+
+def assign_face_to_new_person(conn: sqlite3.Connection, face_id: int, name: str) -> int:
+    person_id = conn.execute(
+        "INSERT INTO people (name, cover_face_id) VALUES (?, ?)", (name.strip() or None, face_id)
+    ).lastrowid
+    assert person_id is not None
+    assign_face(conn, face_id, person_id)
+    return person_id
+
+
+def remove_face(conn: sqlite3.Connection, face_id: int) -> None:
+    """User says: this face is *not* its current person (also rejects a suggestion)."""
+    row = conn.execute("SELECT person_id FROM faces WHERE id = ?", (face_id,)).fetchone()
+    if row is None or row[0] is None:
+        return
+    conn.execute(
+        "INSERT OR IGNORE INTO face_negatives (face_id, person_id) VALUES (?, ?)", (face_id, row[0])
+    )
+    conn.execute(
+        "UPDATE faces SET person_id = NULL, assign_source = NULL, assign_score = NULL WHERE id = ?",
+        (face_id,),
+    )
+    conn.execute(
+        "UPDATE people SET cover_face_id = (SELECT MIN(id) FROM faces WHERE person_id = people.id)"
+        " WHERE id = ? AND cover_face_id = ?",
+        (row[0], face_id),
+    )
+    conn.commit()
