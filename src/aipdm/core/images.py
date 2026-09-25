@@ -1,4 +1,4 @@
-"""Image metadata and thumbnails. Source files are only ever opened for reading."""
+"""Image loading and thumbnails. Source files are only ever opened for reading."""
 
 from dataclasses import dataclass
 from pathlib import Path
@@ -9,23 +9,32 @@ from pillow_heif import register_heif_opener
 register_heif_opener()
 
 THUMB_SIZE = 256
+WORK_MAX_SIDE = 1600  # faces and OCR run on this size (SPEC section 8)
 EXIF_IFD = 0x8769
 DATETIME_ORIGINAL = 0x9003
 
 
 @dataclass(frozen=True)
-class ImageInfo:
-    width: int
-    height: int
+class LoadedImage:
+    image: Image.Image  # RGB, EXIF orientation applied; "original" coordinates
     exif_datetime: str | None
 
 
-def read_image(path: Path, thumb_path: Path) -> ImageInfo:
+def load_image(path: Path) -> LoadedImage:
     with path.open("rb") as fh, Image.open(fh) as img:
-        width, height = img.size
         raw = img.getexif().get_ifd(EXIF_IFD).get(DATETIME_ORIGINAL)
-        save_thumbnail(ImageOps.exif_transpose(img), thumb_path)
-    return ImageInfo(width, height, raw if isinstance(raw, str) else None)
+        oriented = ImageOps.exif_transpose(img).convert("RGB")
+    return LoadedImage(oriented, raw if isinstance(raw, str) else None)
+
+
+def working_copy(img: Image.Image) -> tuple[Image.Image, float]:
+    """Downscale to WORK_MAX_SIDE; returns (image, original/working scale)."""
+    longest = max(img.size)
+    if longest <= WORK_MAX_SIDE:
+        return img, 1.0
+    work = img.copy()
+    work.thumbnail((WORK_MAX_SIDE, WORK_MAX_SIDE))
+    return work, longest / max(work.size)
 
 
 def save_thumbnail(img: Image.Image, thumb_path: Path) -> None:

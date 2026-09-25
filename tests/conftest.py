@@ -2,11 +2,25 @@
 
 import os
 from collections.abc import Iterator
+from functools import partial
 from pathlib import Path
 
 import docx
 import pytest
 from PIL import Image
+
+from aipdm.core.paths import models_dir
+from aipdm.core.scanner import index
+
+# Phase-1 stages only (date, thumb, text): no models needed.
+index_base = partial(index, only=frozenset())
+
+MODELS_PRESENT = (models_dir() / "clip_image.onnx").exists() and (
+    models_dir() / "latin_PP-OCRv5_rec_mobile.onnx"
+).exists()
+requires_models = pytest.mark.skipif(
+    not MODELS_PRESENT, reason="modelos ausentes: rode tools/fetch_models.py e export_clip.py"
+)
 
 EXIF_IFD = 0x8769
 DATETIME_ORIGINAL = 0x9003

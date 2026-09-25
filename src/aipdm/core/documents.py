@@ -1,11 +1,14 @@
 """PDF (pypdfium2) and DOCX (python-docx) text and metadata. Read-only."""
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
 import docx
+import numpy as np
 import pypdfium2 as pdfium
+from numpy.typing import NDArray
 
 from aipdm.core.dates import parse_pdf_date
 from aipdm.core.images import THUMB_SIZE, save_thumbnail
@@ -48,3 +51,23 @@ def read_docx(path: Path) -> DocumentInfo:
     if created is not None and created.tzinfo is not None:
         created = created.astimezone().replace(tzinfo=None)
     return DocumentInfo([(1, text)] if text else [], created)
+
+
+OCR_DPI = 200
+
+
+def ocr_pdf(path: Path, read: Callable[[NDArray[np.uint8]], str]) -> list[tuple[int, str]]:
+    """OCR every page without a text layer (rendered at OCR_DPI). Returns (page, text)."""
+    pdf = pdfium.PdfDocument(path.read_bytes())
+    try:
+        found: list[tuple[int, str]] = []
+        for index in range(len(pdf)):
+            page = pdf[index]
+            if page.get_textpage().get_text_bounded().strip():
+                continue
+            rgb = np.asarray(page.render(scale=OCR_DPI / 72).to_pil().convert("RGB"))
+            if text := read(rgb).strip():
+                found.append((index + 1, text))
+        return found
+    finally:
+        pdf.close()

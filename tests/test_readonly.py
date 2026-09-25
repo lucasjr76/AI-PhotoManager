@@ -4,7 +4,7 @@ import hashlib
 import os
 from pathlib import Path
 
-from aipdm.core.scanner import index
+from conftest import index_base as index
 
 
 def snapshot(root: Path) -> dict[str, tuple[str, int, int, int]]:

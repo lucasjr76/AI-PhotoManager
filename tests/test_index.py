@@ -4,12 +4,13 @@ import zipfile
 from pathlib import Path
 
 import pytest
+from conftest import index_base as index
 from conftest import make_docx, make_pdf
 from PIL import Image
 
 from aipdm.cli import main
 from aipdm.core import db
-from aipdm.core.scanner import in_hidden_folder, index
+from aipdm.core.scanner import in_hidden_folder
 from aipdm.core.search import search_text
 
 
@@ -40,7 +41,7 @@ def test_first_index_classifies_and_dates(sample_dir: Path, db_path: Path) -> No
         "whatsapp_android",
     )
     assert (wa["width"], wa["height"], wa["status"]) == (64, 48, "done")
-    assert wa["hash"] and wa["stages_done"] == "date,thumb,text"
+    assert wa["hash"] and wa["stages_done"] == "date,thumb"
 
     desktop = files["WhatsApp Images/WhatsApp Image 2022-01-02 at 9.05.09 PM.png"]
     assert desktop["taken_at"] == "2022-01-02T21:05:09"
@@ -107,9 +108,9 @@ def test_search_text_ignores_accents(sample_dir: Path, db_path: Path) -> None:
 
 
 def test_cli_index_status_search(sample_dir: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    assert main(["index", str(sample_dir), "--workers", "1"]) == 0
+    assert main(["index", str(sample_dir), "--workers", "1", "--only", ""]) == 0
     assert "Processados: 7 de 7 (erros: 1)" in capsys.readouterr().out
-    assert main(["index", str(sample_dir), "--workers", "1"]) == 0
+    assert main(["index", str(sample_dir), "--workers", "1", "--only", ""]) == 0
     assert "Processados: 0 de 0" in capsys.readouterr().out
 
     assert main(["status"]) == 0

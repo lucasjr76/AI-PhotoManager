@@ -14,24 +14,39 @@ from collections.abc import Callable, Iterator
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, field
 from datetime import date, datetime
-from functools import partial
+from functools import cache, partial
 from itertools import batched
 from multiprocessing import get_context
 from pathlib import Path
 
+import cv2
+import numpy as np
 import xxhash
+from numpy.typing import NDArray
 
 from aipdm.core import db
+from aipdm.core.clip import ClipImageModel, preprocess
 from aipdm.core.dates import resolve_date
-from aipdm.core.documents import read_docx, read_pdf
-from aipdm.core.images import read_image
-from aipdm.core.paths import thumbs_dir_for
+from aipdm.core.documents import ocr_pdf, read_docx, read_pdf
+from aipdm.core.faces import DetectedFace, FaceModel, FaceSettings, GroupingStats, group_faces
+from aipdm.core.images import load_image, save_thumbnail, working_copy
+from aipdm.core.ocr import OcrModel
+from aipdm.core.paths import models_dir, thumbs_dir_for
 
 log = logging.getLogger(__name__)
 
 IMAGE_EXTS = frozenset({"jpg", "jpeg", "png", "webp", "heic", "heif", "bmp"})
-STAGES = "date,thumb,text"
-BATCH_SIZE = 64
+# Stage order per kind. date/thumb/text are cheap and always run together.
+KIND_STAGES = {
+    "image": ("date", "thumb", "faces", "clip", "ocr"),
+    "pdf": ("date", "thumb", "text", "ocr"),
+    "docx": ("date", "text"),
+}
+BASE_STAGES = frozenset({"date", "thumb", "text"})
+HEAVY_STAGES = ("faces", "clip", "ocr")
+STICKER_SKIPS = frozenset({"faces", "ocr"})
+BATCH_SIZE = 64  # files per worker between commits
+CHUNK_SIZE = 8  # files per worker call; CLIP runs batched inside a chunk
 HASH_CHUNK = 1 << 20
 
 
@@ -182,24 +197,65 @@ def scan(conn: sqlite3.Connection, root: Path, *, force: bool = False) -> ScanSt
     return stats
 
 
+def required_stages(kind: str, sticker: bool, only: frozenset[str] | None) -> tuple[str, ...]:
+    stages = KIND_STAGES.get(kind, ())
+    return tuple(
+        s
+        for s in stages
+        if (s in BASE_STAGES or only is None or s in only) and not (sticker and s in STICKER_SKIPS)
+    )
+
+
 @dataclass(frozen=True)
 class Task:
     file_id: int
     path: Path
     kind: str
     thumb_path: Path
+    stages: tuple[str, ...]  # to run now
+    done: tuple[str, ...]  # already done before this run
 
 
 @dataclass
 class Result:
     file_id: int
+    stages: tuple[str, ...] = ()  # completed stages, cumulative
+    base_ran: bool = False
     hash: str | None = None
     taken_at: str | None = None
     date_source: str | None = None
     width: int | None = None
     height: int | None = None
-    pages: list[tuple[int, str]] = field(default_factory=list)
+    pages: list[tuple[int, str]] = field(default_factory=list)  # text layer + OCR
+    faces: list[DetectedFace] | None = None  # None: faces stage did not run
+    clip: bytes | None = None
+    seconds: dict[str, float] = field(default_factory=dict)
     error: str | None = None
+
+
+@dataclass(frozen=True)
+class WorkerConfig:
+    models: Path
+    threads: int  # per inference session; 0 = library default
+    faces: FaceSettings
+    today: date
+
+
+@dataclass(frozen=True)
+class Models:
+    faces: FaceModel
+    clip: ClipImageModel
+    ocr: OcrModel
+
+
+@cache
+def load_models(models: Path, threads: int, settings: FaceSettings) -> Models:
+    """Once per worker process: models are big, and loading them dominates small batches."""
+    if threads:
+        cv2.setNumThreads(threads)
+    return Models(
+        FaceModel(models, settings), ClipImageModel(models, threads), OcrModel(models, threads)
+    )
 
 
 def file_hash(path: Path) -> str:
@@ -210,52 +266,178 @@ def file_hash(path: Path) -> str:
     return h.hexdigest()
 
 
-def process(task: Task, today: date) -> Result:
-    """Run all phase-1 stages for one file. Never raises: errors go into Result.error."""
+class _Timer:
+    def __init__(self, result: Result, stage: str) -> None:
+        self.result, self.stage = result, stage
+
+    def __enter__(self) -> None:
+        self.start = time.perf_counter()
+
+    def __exit__(self, *_: object) -> None:
+        elapsed = time.perf_counter() - self.start
+        self.result.seconds[self.stage] = self.result.seconds.get(self.stage, 0.0) + elapsed
+
+
+def _process_one(
+    task: Task, config: WorkerConfig, clip_inputs: list[tuple[Result, NDArray[np.float32]]]
+) -> Result:
     result = Result(task.file_id)
-    try:
-        st = task.path.stat()
-        result.hash = file_hash(task.path)
-        exif: str | None = None
-        created: datetime | None = None
-        if task.kind == "image":
-            info = read_image(task.path, task.thumb_path)
-            result.width, result.height, exif = info.width, info.height, info.exif_datetime
-        elif task.kind == "pdf":
-            doc = read_pdf(task.path, task.thumb_path)
+    todo = set(task.stages)
+    heavy = todo & set(HEAVY_STAGES)
+    models = load_models(config.models, config.threads, config.faces) if heavy else None
+    exif: str | None = None
+    created: datetime | None = None
+    if todo & BASE_STAGES:
+        result.base_ran = True
+        with _Timer(result, "hash"):
+            result.hash = file_hash(task.path)
+    if task.kind == "image":
+        with _Timer(result, "decode"):
+            loaded = load_image(task.path)
+        img, exif = loaded.image, loaded.exif_datetime
+        result.width, result.height = img.size
+        if "thumb" in todo:
+            with _Timer(result, "thumb"):
+                save_thumbnail(img, task.thumb_path)
+        if models and heavy & {"faces", "ocr"}:
+            work, scale = working_copy(img)
+            rgb = np.asarray(work)
+            if "faces" in todo:
+                with _Timer(result, "faces"):
+                    result.faces = models.faces.detect(rgb, scale)
+            if "ocr" in todo:
+                with _Timer(result, "ocr"):
+                    if text := models.ocr.read(rgb):
+                        result.pages.append((1, text))
+        if "clip" in todo:
+            with _Timer(result, "clip"):
+                clip_inputs.append((result, preprocess(img)))
+    elif task.kind == "pdf":
+        if todo & {"text", "thumb"}:
+            with _Timer(result, "text"):
+                doc = read_pdf(task.path, task.thumb_path)
             result.pages, created = doc.pages, doc.created
-        elif task.kind == "docx":
-            doc = read_docx(task.path)
-            result.pages, created = doc.pages, doc.created
+        if models and "ocr" in todo:
+            with _Timer(result, "ocr"):
+                result.pages += ocr_pdf(task.path, models.ocr.read)
+    elif task.kind == "docx":
+        with _Timer(result, "text"):
+            docx_info = read_docx(task.path)
+        result.pages, created = docx_info.pages, docx_info.created
+    if "date" in todo:
         result.taken_at, result.date_source = resolve_date(
-            task.path.name, today=today, exif=exif, document=created, mtime=st.st_mtime
+            task.path.name,
+            today=config.today,
+            exif=exif,
+            document=created,
+            mtime=task.path.stat().st_mtime,
         )
-    except Exception as exc:  # one bad file must not stop the run
-        result.error = f"{type(exc).__name__}: {exc}"[:500]
     return result
+
+
+def process_chunk(tasks: tuple[Task, ...], config: WorkerConfig) -> list[Result]:
+    """Worker entry point. Never raises: per-file errors go into Result.error."""
+    results: list[Result] = []
+    clip_inputs: list[tuple[Result, NDArray[np.float32]]] = []
+    for task in tasks:
+        try:
+            result = _process_one(task, config, clip_inputs)
+        except Exception as exc:  # one bad file must not stop the run
+            result = Result(task.file_id, error=f"{type(exc).__name__}: {exc}"[:500])
+            clip_inputs = [(r, x) for r, x in clip_inputs if r.file_id != task.file_id]
+        results.append(result)
+    if clip_inputs:
+        models = load_models(config.models, config.threads, config.faces)
+        started = time.perf_counter()
+        try:
+            embeddings = models.clip.encode(np.stack([x for _, x in clip_inputs]))
+            for (result, _), emb in zip(clip_inputs, embeddings, strict=True):
+                result.clip = emb.astype(np.float32).tobytes()
+        except Exception as exc:
+            for result, _ in clip_inputs:
+                result.error = f"clip: {type(exc).__name__}: {exc}"[:500]
+        share = (time.perf_counter() - started) / len(clip_inputs)
+        for result, _ in clip_inputs:
+            result.seconds["clip"] = result.seconds.get("clip", 0.0) + share
+    by_id = {t.file_id: t for t in tasks}
+    for result in results:
+        task = by_id[result.file_id]
+        if not result.error:
+            ran = set(task.stages) | set(task.done)
+            result.stages = tuple(s for s in KIND_STAGES[task.kind] if s in ran)
+    return results
+
+
+def _iou(a: tuple[int, int, int, int], b: tuple[int, int, int, int]) -> float:
+    ax, ay, aw, ah = a
+    bx, by, bw, bh = b
+    w = max(0, min(ax + aw, bx + bw) - max(ax, bx))
+    h = max(0, min(ay + ah, by + bh) - max(ay, by))
+    union = aw * ah + bw * bh - w * h
+    return w * h / union if union else 0.0
+
+
+def _save_faces(conn: sqlite3.Connection, file_id: int, faces: list[DetectedFace]) -> None:
+    """Replace a file's faces, carrying user decisions over to the matching new box."""
+    kept = [
+        (tuple(int(v) for v in bbox.split(",")), person_id)
+        for bbox, person_id in conn.execute(
+            "SELECT bbox, person_id FROM faces WHERE file_id = ? AND assign_source = 'user'",
+            (file_id,),
+        )
+    ]
+    conn.execute("DELETE FROM faces WHERE file_id = ?", (file_id,))
+    for face in faces:
+        person, source = None, None
+        for bbox, person_id in kept:
+            if _iou(face.bbox, bbox) > 0.5:  # type: ignore[arg-type]
+                person, source = person_id, "user"
+        conn.execute(
+            "INSERT INTO faces (file_id, bbox, det_score, embedding, person_id, assign_source)"
+            " VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                file_id,
+                ",".join(map(str, face.bbox)),
+                face.score,
+                face.embedding.tobytes(),
+                person,
+                source,
+            ),
+        )
 
 
 def save(conn: sqlite3.Connection, results: list[Result]) -> None:
     for r in results:
+        if r.error:
+            conn.execute(
+                "UPDATE files SET status = 'error', error = ? WHERE id = ?", (r.error, r.file_id)
+            )
+            continue
+        if r.base_ran:
+            conn.execute(
+                "UPDATE files SET hash = ?, taken_at = ?, date_source = ? WHERE id = ?",
+                (r.hash, r.taken_at, r.date_source, r.file_id),
+            )
+        if r.width:
+            conn.execute(
+                "UPDATE files SET width = ?, height = ? WHERE id = ?",
+                (r.width, r.height, r.file_id),
+            )
         conn.execute(
-            "UPDATE files SET hash = ?, taken_at = ?, date_source = ?, width = ?, height = ?,"
-            " status = ?, error = ?, stages_done = ? WHERE id = ?",
-            (
-                r.hash,
-                r.taken_at,
-                r.date_source,
-                r.width,
-                r.height,
-                "error" if r.error else "done",
-                r.error,
-                "" if r.error else STAGES,
-                r.file_id,
-            ),
+            "UPDATE files SET status = 'done', error = NULL, stages_done = ? WHERE id = ?",
+            (",".join(r.stages), r.file_id),
         )
         conn.executemany(
             "INSERT INTO texts (content, file_id, page) VALUES (?, ?, ?)",
             [(text, r.file_id, page) for page, text in r.pages],
         )
+        if r.faces is not None:
+            _save_faces(conn, r.file_id, r.faces)
+        if r.clip is not None:
+            conn.execute(
+                "INSERT OR REPLACE INTO clip_embeddings (file_id, embedding) VALUES (?, ?)",
+                (r.file_id, r.clip),
+            )
     conn.commit()
 
 
@@ -266,11 +448,42 @@ class IndexStats:
     processed: int = 0
     errors: int = 0
     seconds: float = 0.0
+    stage_seconds: dict[str, float] = field(default_factory=dict)  # summed over workers
+    grouping: GroupingStats | None = None
     interrupted: bool = False
 
 
 def _ignore_sigint() -> None:
     signal.signal(signal.SIGINT, signal.SIG_IGN)
+
+
+def collect_tasks(
+    conn: sqlite3.Connection, root: Path, thumbs: Path, only: frozenset[str] | None
+) -> list[Task]:
+    """Pending files, plus done files missing a stage (e.g. a database from phase 1)."""
+    tasks = []
+    for row in conn.execute(
+        "SELECT id, rel_path, kind, is_sticker, status, stages_done FROM files"
+        " WHERE status IN ('pending', 'done') AND kind != 'other'"
+    ):
+        done = tuple(s for s in (row["stages_done"] or "").split(",") if s)
+        if row["status"] == "pending":
+            done = ()
+        todo = tuple(
+            s for s in required_stages(row["kind"], bool(row["is_sticker"]), only) if s not in done
+        )
+        if todo:
+            tasks.append(
+                Task(
+                    row["id"],
+                    root / row["rel_path"],
+                    row["kind"],
+                    thumbs / f"{row['id']}.jpg",
+                    todo,
+                    done,
+                )
+            )
+    return tasks
 
 
 def index(
@@ -279,21 +492,24 @@ def index(
     *,
     workers: int,
     force: bool = False,
+    only: frozenset[str] | None = None,
+    face_settings: FaceSettings | None = None,
+    models: Path | None = None,
     progress: Callable[[int, int], None] | None = None,
 ) -> IndexStats:
     started = time.monotonic()
     root = root.resolve()
+    settings = face_settings or FaceSettings()
     conn = db.connect(db_path)
     try:
         db.set_meta(conn, "root_path", str(root))
         stats = IndexStats(scan(conn, root, force=force))
-        thumbs = thumbs_dir_for(db_path)
-        tasks = [
-            Task(row["id"], root / row["rel_path"], row["kind"], thumbs / f"{row['id']}.jpg")
-            for row in conn.execute("SELECT id, rel_path, kind FROM files WHERE status = 'pending'")
-        ]
+        tasks = collect_tasks(conn, root, thumbs_dir_for(db_path), only)
         stats.pending = len(tasks)
-        work = partial(process, today=date.today())
+        config = WorkerConfig(
+            models or models_dir(), 1 if workers > 1 else 0, settings, date.today()
+        )
+        work = partial(process_chunk, config=config)
 
         # Ctrl+C: finish the current batch, save it, stop cleanly.
         stop = False
@@ -312,12 +528,17 @@ def index(
             for batch in batched(tasks, BATCH_SIZE * max(workers, 1)):
                 if stop:
                     break
-                results = list(pool.map(work, batch) if pool else map(work, batch))
+                chunks = list(batched(batch, CHUNK_SIZE))
+                results = [
+                    r for rs in (pool.map(work, chunks) if pool else map(work, chunks)) for r in rs
+                ]
                 save(conn, results)
                 stats.processed += len(results)
-                stats.errors += sum(1 for r in results if r.error)
                 for r in results:
+                    for stage, sec in r.seconds.items():
+                        stats.stage_seconds[stage] = stats.stage_seconds.get(stage, 0.0) + sec
                     if r.error:
+                        stats.errors += 1
                         log.info("erro no arquivo id=%s: %s", r.file_id, r.error)
                 if progress:
                     progress(stats.processed, stats.pending)
@@ -326,6 +547,10 @@ def index(
                 pool.shutdown(cancel_futures=True)
             signal.signal(signal.SIGINT, previous)
         stats.interrupted = stop and stats.processed < stats.pending
+        if not stats.interrupted and (only is None or "faces" in only):
+            grouping_started = time.perf_counter()
+            stats.grouping = group_faces(conn, settings)
+            stats.stage_seconds["grouping"] = time.perf_counter() - grouping_started
         stats.seconds = time.monotonic() - started
         db.set_meta(conn, "last_index_at", datetime.now().isoformat(timespec="seconds"))
         db.set_meta(conn, "last_index_seconds", f"{stats.seconds:.1f}")
