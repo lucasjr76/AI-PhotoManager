@@ -548,9 +548,9 @@ async function screenFolders() {
       if (!j.running) { clearInterval(indexPoll); refreshStatus(); }
     }, 1000);
   };
-  const reindex = async (force) => {
+  const reindex = async (force, retryErrors = false) => {
     if (force && !confirm("Reprocessar todos os arquivos? Pode levar bastante tempo. Nomes e correções de pessoas são mantidos.")) return;
-    drawJob(await api("/api/index", { force }));
+    drawJob(await api("/api/index", { force, retry_errors: retryErrors }));
     poll();
   };
   const openPath = async (path) => {
@@ -570,7 +570,10 @@ async function screenFolders() {
       h("p", {}, h("strong", {}, status.root), h("span", { class: "muted" }, ` · ${status.files} fotos e documentos`)),
       h("div", { class: "toolbar" },
         h("button", { class: "primary", onclick: () => reindex(false), disabled: job.running }, "Re-escanear pasta"),
-        h("button", { onclick: () => reindex(true), disabled: job.running }, "Reprocessar tudo")),
+        h("button", { onclick: () => reindex(true), disabled: job.running }, "Reprocessar tudo"),
+        status.errors ? h("button", { onclick: () => reindex(false, true), disabled: job.running,
+          title: "Arquivos que falharam antes (por exemplo, antes de uma atualização do app)" },
+          `Tentar de novo ${status.errors} com erro`) : null),
       h("p", { class: "muted" }, "Re-escanear processa só o que foi adicionado ou mudou. A pasta nunca é alterada."),
       monitorPanel(monitor),
       panel)

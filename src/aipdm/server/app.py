@@ -58,6 +58,7 @@ class OpenFolder(BaseModel):
 
 class StartIndex(BaseModel):
     force: bool = False
+    retry_errors: bool = False
 
 
 DB_ID = re.compile(r"^[0-9a-f]{16}$")
@@ -204,6 +205,7 @@ def create_app(
             "suggested": suggested,
             "unassigned": orphans,
             "files": c.execute("SELECT COUNT(*) FROM files WHERE kind != 'other'").fetchone()[0],
+            "errors": c.execute("SELECT COUNT(*) FROM files WHERE status = 'error'").fetchone()[0],
         }
 
     @app.get("/api/people")
@@ -482,7 +484,7 @@ def create_app(
                 _start_index(folder.resolve(), force=False)
             return {"id": state.db.stem, "root": str(folder.resolve()), "new": new}
 
-    def _start_index(root: Path, *, force: bool) -> IndexJob:
+    def _start_index(root: Path, *, force: bool, retry_errors: bool = False) -> IndexJob:
         job = IndexJob()
         target = current_db()
 
@@ -496,6 +498,7 @@ def create_app(
                     target,
                     workers=workers or scanner.default_workers(),
                     force=force,
+                    retry_errors=retry_errors,
                     only=index_only,
                     progress=progress,
                     stop=job.stop,
@@ -527,7 +530,7 @@ def create_app(
             root = root_of(c)
             if not root.is_dir():
                 raise HTTPException(400, "a pasta não está acessível")
-            _start_index(root, force=body.force)
+            _start_index(root, force=body.force, retry_errors=body.retry_errors)
         return index_status()
 
     @app.post("/api/index/cancel")

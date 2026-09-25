@@ -313,3 +313,24 @@ def test_pending_changes_is_read_only_and_matches_scan(sample_dir: Path, db_path
     conn = db.connect(db_path)
     assert pending_changes(conn, sample_dir) == frozenset()  # scan absorbed exactly those
     conn.close()
+
+
+def test_200_megapixel_photos_are_accepted() -> None:
+    import warnings
+
+    from PIL import Image as PILImage
+
+    import aipdm.core.images  # noqa: F401  (sets the limit on import)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")  # no DecompressionBombWarning either
+        PILImage._decompression_bomb_check((16320, 12240))  # Galaxy 200 MP, 4:3
+    with pytest.raises(PILImage.DecompressionBombError):
+        PILImage._decompression_bomb_check((40000, 40000))  # 1.6 gigapixel: still refused
+
+
+def test_retry_errors(sample_dir: Path, db_path: Path) -> None:
+    assert index(sample_dir, db_path, workers=1).errors == 1
+    assert index(sample_dir, db_path, workers=1).processed == 0  # errors are not retried...
+    retried = index(sample_dir, db_path, workers=1, retry_errors=True)
+    assert (retried.processed, retried.errors) == (1, 1)  # ...unless asked (still broken)

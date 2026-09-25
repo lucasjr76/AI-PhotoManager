@@ -63,7 +63,13 @@ def cmd_index(args: argparse.Namespace) -> int:
             print(f"Estágio desconhecido: {', '.join(sorted(unknown))}", file=sys.stderr)
             return 1
     stats = scanner.index(
-        root, db_path, workers=args.workers, force=args.force, only=only, progress=progress
+        root,
+        db_path,
+        workers=args.workers,
+        force=args.force,
+        retry_errors=args.retry_errors,
+        only=only,
+        progress=progress,
     )
     if stats.pending:
         print(file=sys.stderr)
@@ -331,6 +337,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--db", help="caminho do banco (padrão: diretório de dados)")
     p.add_argument("--workers", type=int, default=scanner.default_workers())
     p.add_argument("--force", action="store_true", help="reprocessa todos os arquivos")
+    p.add_argument(
+        "--retry-errors", action="store_true", help="tenta de novo os arquivos que deram erro"
+    )
     p.add_argument(
         "--only",
         help="só estes estágios pesados: faces,clip,ocr (vazio = só data/thumb/texto)",

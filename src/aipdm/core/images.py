@@ -10,6 +10,13 @@ from aipdm.core.places import gps_from_exif
 
 register_heif_opener()
 
+# Pillow warns above ~89 MP and refuses above ~179 MP ("decompression bomb"). Phones now
+# shoot 200 MP (16320x12240 = 200 MP), so allow up to 300 MP; beyond that stays refused.
+# ponytail: a 200 MP HEIC decodes to ~600 MB of RGB per worker; downscale-on-decode if
+# folders full of these exhaust RAM (JPEG draft mode works, HEIC has no equivalent).
+MAX_PIXELS = 300_000_000
+Image.MAX_IMAGE_PIXELS = MAX_PIXELS
+
 THUMB_SIZE = 256
 WORK_MAX_SIDE = 1600  # faces and OCR run on this size (SPEC section 8)
 EXIF_IFD = 0x8769

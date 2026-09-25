@@ -156,7 +156,9 @@ def pending_changes(conn: sqlite3.Connection, root: Path) -> frozenset[tuple[str
     return frozenset(changes)
 
 
-def scan(conn: sqlite3.Connection, root: Path, *, force: bool = False) -> ScanStats:
+def scan(
+    conn: sqlite3.Connection, root: Path, *, force: bool = False, retry_errors: bool = False
+) -> ScanStats:
     """Sync the files table with the folder. New/changed files become 'pending'."""
     stats = ScanStats()
     known = {
@@ -213,6 +215,11 @@ def scan(conn: sqlite3.Connection, root: Path, *, force: bool = False) -> ScanSt
     ]
     stats.missing = len(gone)
     conn.executemany("UPDATE files SET status = 'missing' WHERE id = ?", gone)
+    if retry_errors:  # e.g. after an update that fixes what made them fail
+        conn.execute(
+            "UPDATE files SET status = 'pending', error = NULL, stages_done = ''"
+            " WHERE status = 'error'"
+        )
     if force:
         conn.execute(
             "UPDATE files SET status = 'pending', error = NULL, stages_done = '', lat = NULL,"
@@ -544,6 +551,7 @@ def index(
     *,
     workers: int,
     force: bool = False,
+    retry_errors: bool = False,
     only: frozenset[str] | None = None,
     face_settings: FaceSettings | None = None,
     models: Path | None = None,
@@ -558,7 +566,7 @@ def index(
     conn = db.connect(db_path)
     try:
         db.set_meta(conn, "root_path", str(root))
-        stats = IndexStats(scan(conn, root, force=force))
+        stats = IndexStats(scan(conn, root, force=force, retry_errors=retry_errors))
         tasks = collect_tasks(conn, root, thumbs_dir_for(db_path), only)
         stats.pending = len(tasks)
         config = WorkerConfig(
