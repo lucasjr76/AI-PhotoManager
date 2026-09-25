@@ -78,7 +78,105 @@ function resolvePerson(text) {
 }
 
 function openFile(fileId) {
-  api(`/api/files/${fileId}/open`, {}).catch(() => {});
+  api(`/api/files/${fileId}/open`, {}).catch(() => {});  // api() already shows the error
+}
+
+function fmtSize(bytes) {
+  return bytes > 1 << 20 ? `${(bytes / (1 << 20)).toFixed(1)} MB` : `${Math.round(bytes / 1024)} KB`;
+}
+
+// In-app viewer. items: [{file_id}], shows items[index]; ←/→ other files, ↑/↓ PDF pages, Esc.
+function openViewer(items, index) {
+  let i = index;
+  let page = 1;
+  let pages = 1;
+  let seq = 0;  // ignore responses for files the user already moved past
+  const img = h("img", { class: "viewer-img", alt: "" });
+  const text = h("pre", { class: "viewer-text", hidden: true });
+  const failed = h("div", { class: "empty", hidden: true }, "Não foi possível abrir este arquivo.");
+  const side = h("aside", { class: "viewer-info" });
+  const stage = h("div", { class: "viewer-stage" }, img, text, failed);
+  const overlay = h("div", { class: "viewer", role: "dialog", "aria-modal": "true" }, stage, side);
+  overlay.addEventListener("click", (e) => { if (e.target === overlay || e.target === stage) close(); });
+  img.addEventListener("error", () => { if (img.getAttribute("src")) { img.hidden = true; failed.hidden = false; } });
+
+  const go = (delta) => {
+    const next = i + delta;
+    if (next < 0 || next >= items.length) return;
+    i = next;
+    page = 1;
+    show();
+  };
+  const turn = (delta) => {
+    const next = page + delta;
+    if (next < 1 || next > pages) return;
+    page = next;
+    img.src = `/api/files/${items[i].file_id}/view?page=${page}`;
+    drawSide(lastInfo);
+  };
+  let lastInfo = null;
+
+  const drawSide = (info) => {
+    put(side,
+      h("div", { class: "toolbar" },
+        h("button", { onclick: () => go(-1), disabled: i === 0, title: "←" }, "‹ Anterior"),
+        h("span", { class: "muted" }, `${i + 1} de ${items.length}`),
+        h("button", { onclick: () => go(1), disabled: i === items.length - 1, title: "→" }, "Próximo ›"),
+        h("button", { class: "close", onclick: close, title: "Esc" }, "✕")),
+      info ? [
+        h("h2", {}, info.rel_path.split("/").pop()),
+        h("div", {}, fmtDate(info.taken_at)),
+        info.place ? h("div", {}, `📍 ${info.place}`) : null,
+        info.people.length ? h("div", { class: "chips" }, info.people.map((p) =>
+          h("a", { class: "chip", href: `#/pessoa/${p.id}`, onclick: close }, p.name))) : null,
+        info.kind === "pdf" && pages > 1 ? h("div", { class: "toolbar" },
+          h("button", { onclick: () => turn(-1), disabled: page === 1, title: "↑" }, "‹ Página"),
+          h("span", {}, `${page} de ${pages}`),
+          h("button", { onclick: () => turn(1), disabled: page === pages, title: "↓" }, "Página ›")) : null,
+        h("div", { class: "muted small" },
+          [info.width ? `${info.width} × ${info.height} px` : null, fmtSize(info.size)].filter(Boolean).join(" · ")),
+        h("div", { class: "muted small path" }, info.rel_path),
+        h("button", { onclick: () => openFile(info.id) }, "Abrir no visualizador do sistema"),
+      ] : h("div", { class: "muted" }, "Carregando…"));
+  };
+
+  const show = async () => {
+    const mine = ++seq;
+    const item = items[i];
+    lastInfo = null;
+    failed.hidden = true;
+    drawSide(null);
+    const info = await api(`/api/files/${item.file_id}/info`);
+    if (mine !== seq) return;
+    lastInfo = info;
+    pages = info.pages || 1;
+    if (info.kind === "docx") {
+      img.hidden = true;
+      img.removeAttribute("src");
+      text.hidden = false;
+      text.textContent = info.text || "(documento sem texto)";
+    } else {
+      text.hidden = true;
+      img.hidden = false;
+      img.src = `/api/files/${item.file_id}/view?page=${page}`;
+    }
+    drawSide(info);
+    const next = items[i + 1];  // warm the next preview so → is instant
+    if (next && next.kind !== "docx") new Image().src = `/api/files/${next.file_id}/view`;
+  };
+
+  const onKey = (e) => {
+    const actions = { ArrowLeft: () => go(-1), ArrowRight: () => go(1), ArrowUp: () => turn(-1),
+      ArrowDown: () => turn(1), PageUp: () => turn(-1), PageDown: () => turn(1), Escape: close };
+    if (actions[e.key]) { e.preventDefault(); actions[e.key](); }
+  };
+  function close() {
+    document.removeEventListener("keydown", onKey);
+    overlay.remove();
+  }
+  document.addEventListener("keydown", onKey);
+  document.body.append(overlay);
+  show();
 }
 
 // Face grid with click-to-select; double click opens the photo.
@@ -92,7 +190,7 @@ function faceGrid(faces, selected, onChange) {
         el.classList.toggle("selected");
         onChange();
       },
-      ondblclick: () => openFile(f.file),
+      ondblclick: () => openViewer(faces.map((x) => ({ file_id: x.file })), faces.indexOf(f)),
     }, h("img", { src: crop(f.id), loading: "lazy", alt: "" }),
       f.source === "suggested" ? h("span", { class: "tag" }, "sugerido") : null);
     return el;
@@ -212,7 +310,7 @@ async function screenSuggestions() {
   const list = h("div");
   const row = (s) => {
     const el = h("div", { class: "suggestion" },
-      h("img", { src: crop(s.face), alt: "", title: "Duplo clique abre a foto", ondblclick: () => openFile(s.file) }),
+      h("img", { src: crop(s.face), alt: "", title: "Clique para ver a foto", onclick: () => openViewer([{ file_id: s.file }], 0) }),
       h("div", { class: "question" }, "É ", h("strong", {}, s.name), "?",
         h("div", { class: "muted" }, `semelhança ${(s.score * 100).toFixed(0)}%`)),
       h("img", { src: crop(s.cover), alt: "" }),
@@ -284,16 +382,16 @@ function fmtDate(iso) {
 
 const PAGE = 120;
 
-function photoCard(x) {
-  return h("div", { class: "card photo", title: `${x.rel_path}\nDuplo clique abre a foto`, ondblclick: () => openFile(x.file_id) },
+function photoCard(x, open) {
+  return h("div", { class: "card photo", title: x.rel_path, onclick: open },
     h("img", { src: `/api/files/${x.file_id}/thumb`, loading: "lazy", alt: "" }),
     h("div", { class: "muted small" }, fmtDate(x.taken_at)),
     x.place ? h("div", { class: "muted small place", title: x.place }, `📍 ${x.place.split(", ")[0]}`) : null,
     x.snippet && !(x.place && x.snippet.includes(x.place.split(", ")[0])) ? snippet(x.snippet) : null);
 }
 
-function docRow(x) {
-  return h("div", { class: "doc", title: "Duplo clique abre o documento", ondblclick: () => openFile(x.file_id) },
+function docRow(x, open) {
+  return h("div", { class: "doc", title: x.rel_path, onclick: open },
     h("div", {}, h("strong", {}, x.rel_path.split("/").pop()),
       h("span", { class: "muted small" }, `  ${x.kind.toUpperCase()}${x.page ? " · p. " + x.page : ""} · ${fmtDate(x.taken_at)}`)),
     x.snippet ? snippet(x.snippet) : null);
@@ -303,6 +401,8 @@ function docRow(x) {
 // onFirst(response, ms) runs once with the first page (for totals and headers).
 function pagedResults(params, onFirst) {
   const photos = h("div", { class: "grid photos" });
+  const photoItems = [];
+  const docItems = [];
   const docs = h("div", { class: "docs" });
   const sentinel = h("div", { class: "muted sentinel" });
   const box = h("div", {}, photos, docs, sentinel);
@@ -322,8 +422,14 @@ function pagedResults(params, onFirst) {
       if (offset === 0) onFirst(r, Math.round(performance.now() - t0));
       total = r.total;
       offset += r.hits.length;
-      photos.append(...r.hits.filter((x) => x.kind === "image").map(photoCard));
-      docs.append(...r.hits.filter((x) => x.kind !== "image").map(docRow));
+      // Viewer navigation runs over everything loaded so far, photos and documents apart.
+      for (const x of r.hits) {
+        const list = x.kind === "image" ? photoItems : docItems;
+        list.push(x);
+        const at = list.length - 1;
+        (x.kind === "image" ? photos : docs).append(
+          x.kind === "image" ? photoCard(x, () => openViewer(photoItems, at)) : docRow(x, () => openViewer(docItems, at)));
+      }
       if (!r.hits.length) total = offset;
       sentinel.textContent = offset < total ? "" : (total ? `Fim — ${total} resultado(s).` : "Nenhum resultado.");
     } finally {
@@ -373,7 +479,7 @@ async function screenSearch() {
         if (r.mentions.length) {
           parts.unshift(h("details", { class: "mentions" },
             h("summary", {}, `Documentos e textos que citam ${r.person} (${r.mentions.length})`),
-            h("div", { class: "docs" }, r.mentions.map(docRow))));
+            h("div", { class: "docs" }, r.mentions.map((x, at) => docRow(x, () => openViewer(r.mentions, at))))));
         }
       }
       put(header, ...parts);

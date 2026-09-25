@@ -9,6 +9,7 @@ import docx
 import numpy as np
 import pypdfium2 as pdfium
 from numpy.typing import NDArray
+from PIL import Image
 
 from aipdm.core.dates import parse_pdf_date
 from aipdm.core.images import THUMB_SIZE, save_thumbnail
@@ -69,5 +70,27 @@ def ocr_pdf(path: Path, read: Callable[[NDArray[np.uint8]], str]) -> list[tuple[
             if text := read(rgb).strip():
                 found.append((index + 1, text))
         return found
+    finally:
+        pdf.close()
+
+
+def pdf_page_count(path: Path) -> int:
+    pdf = pdfium.PdfDocument(path.read_bytes())
+    try:
+        return len(pdf)
+    finally:
+        pdf.close()
+
+
+def render_pdf_page(path: Path, page: int, max_side: int) -> Image.Image:
+    """1-based `page` rendered so its longest side is `max_side` pixels."""
+    pdf = pdfium.PdfDocument(path.read_bytes())
+    try:
+        if not 1 <= page <= len(pdf):
+            raise IndexError(f"página {page} fora do documento")
+        doc_page = pdf[page - 1]
+        scale = max_side / max(doc_page.get_size())
+        image: Image.Image = doc_page.render(scale=scale).to_pil()
+        return image
     finally:
         pdf.close()

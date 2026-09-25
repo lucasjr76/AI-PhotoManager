@@ -9,6 +9,7 @@ import hmac
 import logging
 import os
 import re
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -26,7 +27,8 @@ from pydantic import BaseModel
 
 from aipdm.core import db, faces, paths, scanner
 from aipdm.core import search as searching
-from aipdm.core.images import load_image
+from aipdm.core.documents import pdf_page_count, render_pdf_page
+from aipdm.core.images import PREVIEW_MAX_SIDE, load_image, save_preview
 from aipdm.core.paths import thumbs_dir_for
 
 log = logging.getLogger(__name__)
@@ -100,6 +102,30 @@ class State:
     lock: threading.Lock = field(default_factory=threading.Lock)
 
 
+def has_default_app(path: Path) -> bool:
+    """Linux: does xdg-open have an application for this file type?"""
+    if not shutil.which("xdg-mime"):
+        return True  # cannot tell; let xdg-open try
+    try:
+        mime = subprocess.run(
+            ["xdg-mime", "query", "filetype", str(path)],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        ).stdout.strip()
+        app = subprocess.run(
+            ["xdg-mime", "query", "default", mime],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        ).stdout.strip()
+    except (OSError, subprocess.TimeoutExpired):
+        return True
+    return bool(mime and app)
+
+
 def default_encoder() -> searching.TextEncoder | None:
     from aipdm.core.clip import ClipTextModel
 
@@ -166,7 +192,9 @@ def create_app(
 
     def file_row(c: sqlite3.Connection, file_id: int) -> sqlite3.Row:
         row = c.execute(
-            "SELECT id, rel_path, kind FROM files WHERE id = ? AND status != 'missing'", (file_id,)
+            "SELECT id, rel_path, kind, hash, mtime FROM files"
+            " WHERE id = ? AND status != 'missing'",
+            (file_id,),
         ).fetchone()
         if row is None:
             raise HTTPException(404)
@@ -345,11 +373,82 @@ def create_app(
     @app.post("/api/files/{file_id}/open")
     def open_file(file_id: int, c: sqlite3.Connection = Conn) -> dict[str, str]:
         path = root_of(c) / file_row(c, file_id)["rel_path"]
+        no_app = HTTPException(409, "Nenhum programa do sistema abre este tipo de arquivo.")
         if sys.platform == "win32":
-            os.startfile(path)  # type: ignore[attr-defined]
-        else:
-            subprocess.Popen(["xdg-open", str(path)], start_new_session=True)
+            try:
+                os.startfile(path)  # type: ignore[attr-defined]
+            except OSError as exc:  # no association for the extension
+                raise no_app from exc
+            return {"ok": "sim"}
+        if not has_default_app(path):
+            raise no_app
+        subprocess.Popen(["xdg-open", str(path)], start_new_session=True)
         return {"ok": "sim"}
+
+    # --- in-app viewer -----------------------------------------------------------
+
+    @app.get("/api/files/{file_id}/view")
+    def view(file_id: int, page: int = 1, c: sqlite3.Connection = Conn) -> FileResponse:
+        """The file as a JPEG for the in-app viewer: photos of any format, PDF pages."""
+        row = file_row(c, file_id)
+        if row["kind"] not in ("image", "pdf"):
+            raise HTTPException(404)
+        page = max(1, page) if row["kind"] == "pdf" else 1
+        version = row["hash"] or int(row["mtime"])  # a changed file gets a new preview
+        cached = current_db().with_suffix(".previews") / f"{file_id}-{page}-{version}.jpg"
+        if not cached.exists():
+            path = root_of(c) / row["rel_path"]
+            try:
+                if row["kind"] == "image":
+                    img = load_image(path).image
+                else:
+                    img = render_pdf_page(path, page, PREVIEW_MAX_SIDE)
+            except IndexError as exc:
+                raise HTTPException(404) from exc
+            except Exception as exc:  # unreadable or protected file
+                raise HTTPException(422, "não foi possível abrir este arquivo") from exc
+            save_preview(img, cached)
+        return FileResponse(cached, media_type="image/jpeg")
+
+    @app.get("/api/files/{file_id}/info")
+    def info(file_id: int, c: sqlite3.Connection = Conn) -> dict[str, object]:
+        row = c.execute(
+            "SELECT id, rel_path, kind, taken_at, city, state, country, width, height, size"
+            " FROM files WHERE id = ? AND status != 'missing'",
+            (file_id,),
+        ).fetchone()
+        if row is None:
+            raise HTTPException(404)
+        people_rows = c.execute(
+            "SELECT DISTINCT p.id, p.name FROM faces fa JOIN people p ON p.id = fa.person_id"
+            " WHERE fa.file_id = ? AND fa.assign_source != 'suggested' AND p.name IS NOT NULL"
+            " ORDER BY p.name",
+            (file_id,),
+        ).fetchall()
+        data: dict[str, object] = {
+            "id": row["id"],
+            "rel_path": row["rel_path"],
+            "kind": row["kind"],
+            "taken_at": row["taken_at"],
+            "place": ", ".join(p for p in (row["city"], row["state"], row["country"]) if p) or None,
+            "width": row["width"],
+            "height": row["height"],
+            "size": row["size"],
+            "people": [{"id": r[0], "name": r[1]} for r in people_rows],
+        }
+        path = root_of(c) / row["rel_path"]
+        if row["kind"] == "pdf":
+            try:
+                data["pages"] = pdf_page_count(path)
+            except Exception:
+                data["pages"] = 0
+        if row["kind"] == "docx":
+            texts = c.execute(
+                "SELECT content FROM texts WHERE file_id = ? AND page >= 1 ORDER BY page",
+                (file_id,),
+            ).fetchall()
+            data["text"] = "\n\n".join(t[0] for t in texts)[:100_000]
+        return data
 
     # --- search -------------------------------------------------------------
 

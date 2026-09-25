@@ -67,3 +67,19 @@ def save_thumbnail(img: Image.Image, thumb_path: Path) -> None:
     thumb.thumbnail((THUMB_SIZE, THUMB_SIZE))
     thumb_path.parent.mkdir(parents=True, exist_ok=True)
     thumb.save(thumb_path, "JPEG", quality=80)
+
+
+PREVIEW_MAX_SIDE = 2560  # in-app viewer: enough for a 4K screen
+
+
+def save_preview(img: Image.Image, target: Path, max_side: int = PREVIEW_MAX_SIDE) -> None:
+    """JPEG for the in-app viewer (any format Pillow/pillow-heif reads, HEIC included).
+
+    Written to a temporary name and renamed, so a parallel request never reads half a file.
+    """
+    view = img.convert("RGB")
+    view.thumbnail((max_side, max_side))
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp = target.with_name(f"{target.name}.{id(view)}.tmp")
+    view.save(tmp, "JPEG", quality=88)
+    tmp.replace(target)
