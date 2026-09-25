@@ -10,3 +10,4 @@ models/*.onnx
 models/*.json
 graphify-out/
 .claude/settings.local.json
+models/*.gz

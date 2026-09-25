@@ -58,6 +58,14 @@ MIGRATIONS: tuple[str, ...] = (
       embedding BLOB NOT NULL
     );
     """,
+    """
+    ALTER TABLE files ADD COLUMN lat REAL;
+    ALTER TABLE files ADD COLUMN lon REAL;
+    ALTER TABLE files ADD COLUMN city TEXT;
+    ALTER TABLE files ADD COLUMN state TEXT;
+    ALTER TABLE files ADD COLUMN country TEXT;
+    CREATE INDEX files_place ON files(country, state, city);
+    """,
 )
 
 

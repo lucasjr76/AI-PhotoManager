@@ -12,3 +12,4 @@ Os arquivos de modelo não são versionados no git.
 | clip_image.onnx | MIT | https://huggingface.co/laion/CLIP-ViT-B-32-xlm-roberta-base-laion5B-s13B-b90k (tools/export_clip.py) | 0503378424987d488423549fb975941076e477dda4bc6318d1c83cf6417a4574 |
 | clip_text.onnx | MIT | https://huggingface.co/laion/CLIP-ViT-B-32-xlm-roberta-base-laion5B-s13B-b90k (tools/export_clip.py), int8 | f0f6d17c96c95c6053d9472947ae2a972992d42db93d4ae9acc5aa776a03a26c |
 | clip_tokenizer.json | MIT | https://huggingface.co/FacebookAI/xlm-roberta-base | acbd420e2269cdc1ef45332d3d5c418be4aef6b8cb5a0b7ccae0893485307153 |
+| places.tsv.gz | CC-BY-4.0 (GeoNames) | https://download.geonames.org/export/dump/cities500.zip | 45634aef65bab219f83e01cf129af4fee4e575c2c68a57cdd237760775b496a2 |

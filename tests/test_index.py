@@ -41,7 +41,7 @@ def test_first_index_classifies_and_dates(sample_dir: Path, db_path: Path) -> No
         "whatsapp_android",
     )
     assert (wa["width"], wa["height"], wa["status"]) == (64, 48, "done")
-    assert wa["hash"] and wa["stages_done"] == "date,thumb"
+    assert wa["hash"] and wa["stages_done"] == "date,gps,thumb"
 
     desktop = files["WhatsApp Images/WhatsApp Image 2022-01-02 at 9.05.09 PM.png"]
     assert desktop["taken_at"] == "2022-01-02T21:05:09"
@@ -216,3 +216,69 @@ def test_rows_from_hidden_folders_are_purged(sample_dir: Path, db_path: Path) ->
     conn = db.connect(db_path)
     assert conn.execute("SELECT COUNT(*) FROM texts WHERE content = 'x'").fetchone()[0] == 0
     conn.close()
+
+
+def gps_jpeg(path: Path, lat: float, lon: float) -> None:
+    def dms(v: float) -> tuple[float, float, float]:
+        v = abs(v)
+        return (float(int(v)), float(int(v * 60 % 60)), round(v * 3600 % 60, 3))
+
+    exif = Image.Exif()
+    exif.get_ifd(0x8825).update(
+        {1: "S" if lat < 0 else "N", 2: dms(lat), 3: "W" if lon < 0 else "E", 4: dms(lon)}
+    )
+    Image.new("RGB", (32, 32), "white").save(path, exif=exif)
+
+
+@pytest.fixture
+def places_dir(tmp_path: Path) -> Path:
+    import gzip
+
+    models = tmp_path / "modelos"
+    models.mkdir()
+    with gzip.open(models / "places.tsv.gz", "wt", encoding="utf-8") as fh:
+        fh.write("Florianópolis\tSanta Catarina\tBrazil\t-27.59667\t-48.54917\n")
+        fh.write("Curitiba\tParaná\tBrazil\t-25.42778\t-49.27306\n")
+    return models
+
+
+def test_gps_location_is_named_and_searchable(
+    sample_dir: Path, db_path: Path, places_dir: Path
+) -> None:
+    gps_jpeg(sample_dir / "praia.jpg", -27.60, -48.55)
+    gps_jpeg(sample_dir / "oceano.jpg", -30.0, -20.0)
+    stats = index(sample_dir, db_path, workers=1, models=places_dir)
+    assert stats.places == 2
+    files = rows(db_path)
+    praia = files["praia.jpg"]
+    assert praia["lat"] == pytest.approx(-27.60, abs=1e-3)
+    assert (praia["city"], praia["state"], praia["country"]) == (
+        "Florianópolis",
+        "Santa Catarina",
+        "Brazil",
+    )
+    assert files["oceano.jpg"]["city"] == ""  # too far from any town, not retried
+    assert files["camera.jpg"]["lat"] is None  # no GPS in EXIF
+    conn = db.connect(db_path)
+    found = {h.rel_path for h in search_text(conn, "florianopolis")}
+    assert found == {"praia.jpg", "WhatsApp Documents/relatorio.docx"}  # the docx cites it too
+    conn.close()
+    assert index(sample_dir, db_path, workers=1, models=places_dir).places == 0
+
+
+def test_indexed_folder_gets_only_gps(sample_dir: Path, db_path: Path, places_dir: Path) -> None:
+    gps_jpeg(sample_dir / "praia.jpg", -25.43, -49.27)
+    index(sample_dir, db_path, workers=1, models=places_dir)
+    conn = db.connect(db_path)  # as if indexed before the gps stage existed
+    conn.execute(
+        "UPDATE files SET stages_done = 'date,thumb', lat = NULL, lon = NULL, city = NULL"
+        " WHERE kind = 'image'"
+    )
+    conn.execute("DELETE FROM texts WHERE page = 0")
+    conn.commit()
+    conn.close()
+
+    stats = index(sample_dir, db_path, workers=1, models=places_dir)
+    assert stats.processed == 5  # the 5 good images; the broken one stays in error
+    assert "decode" not in stats.stage_seconds and "hash" not in stats.stage_seconds
+    assert rows(db_path)["praia.jpg"]["city"] == "Curitiba"

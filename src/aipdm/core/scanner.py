@@ -30,20 +30,22 @@ from aipdm.core.clip import ClipImageModel, preprocess
 from aipdm.core.dates import resolve_date
 from aipdm.core.documents import ocr_pdf, read_docx, read_pdf
 from aipdm.core.faces import DetectedFace, FaceModel, FaceSettings, GroupingStats, group_faces
-from aipdm.core.images import load_image, save_thumbnail, working_copy
+from aipdm.core.images import load_image, read_gps, save_thumbnail, working_copy
 from aipdm.core.ocr import OcrModel
 from aipdm.core.paths import models_dir, thumbs_dir_for
+from aipdm.core.places import PLACES_FILE, resolve_places
 
 log = logging.getLogger(__name__)
 
 IMAGE_EXTS = frozenset({"jpg", "jpeg", "png", "webp", "heic", "heif", "bmp"})
 # Stage order per kind. date/thumb/text are cheap and always run together.
 KIND_STAGES = {
-    "image": ("date", "thumb", "faces", "clip", "ocr"),
+    "image": ("date", "gps", "thumb", "faces", "clip", "ocr"),
     "pdf": ("date", "thumb", "text", "ocr"),
     "docx": ("date", "text"),
 }
-BASE_STAGES = frozenset({"date", "thumb", "text"})
+BASE_STAGES = frozenset({"date", "gps", "thumb", "text"})
+PIXEL_STAGES = frozenset({"date", "thumb", "faces", "clip", "ocr"})  # need the decoded image
 HEAVY_STAGES = ("faces", "clip", "ocr")
 STICKER_SKIPS = frozenset({"faces", "ocr"})
 IN_FLIGHT_PER_WORKER = 2  # queued chunks per worker; bounds memory and Ctrl+C latency
@@ -158,7 +160,8 @@ def scan(conn: sqlite3.Connection, root: Path, *, force: bool = False) -> ScanSt
             stats.changed += 1
             conn.execute(
                 "UPDATE files SET kind = ?, size = ?, mtime = ?, hash = NULL, status = ?,"
-                " error = NULL, stages_done = '' WHERE id = ?",
+                " error = NULL, stages_done = '', lat = NULL, lon = NULL, city = NULL,"
+                " state = NULL, country = NULL WHERE id = ?",
                 (kind, size, mtime, fresh_status, row["id"]),
             )
         elif row["status"] == "missing":
@@ -187,7 +190,8 @@ def scan(conn: sqlite3.Connection, root: Path, *, force: bool = False) -> ScanSt
     conn.executemany("UPDATE files SET status = 'missing' WHERE id = ?", gone)
     if force:
         conn.execute(
-            "UPDATE files SET status = 'pending', error = NULL, stages_done = ''"
+            "UPDATE files SET status = 'pending', error = NULL, stages_done = '', lat = NULL,"
+            " lon = NULL, city = NULL, state = NULL, country = NULL"
             " WHERE status IN ('done', 'error') AND kind != 'other'"
         )
     # Stale text of anything about to be (re)processed; one FTS scan instead of one per file.
@@ -221,7 +225,9 @@ class Task:
 class Result:
     file_id: int
     stages: tuple[str, ...] = ()  # completed stages, cumulative
-    base_ran: bool = False
+    base_ran: bool = False  # hash + date were computed
+    gps: tuple[float, float] | None = None
+    gps_ran: bool = False
     hash: str | None = None
     taken_at: str | None = None
     date_source: str | None = None
@@ -288,15 +294,21 @@ def _process_one(
     models = load_models(config.models, config.threads, config.faces) if heavy else None
     exif: str | None = None
     created: datetime | None = None
-    if todo & BASE_STAGES:
+    if "date" in todo:
         result.base_ran = True
         with _Timer(result, "hash"):
             result.hash = file_hash(task.path)
-    if task.kind == "image":
+    if task.kind == "image" and not todo & PIXEL_STAGES:
+        # Only location is missing (folder indexed before GPS existed): header only.
+        with _Timer(result, "gps"):
+            result.gps, result.gps_ran = read_gps(task.path), True
+    elif task.kind == "image":
         with _Timer(result, "decode"):
             loaded = load_image(task.path)
         img, exif = loaded.image, loaded.exif_datetime
         result.width, result.height = img.size
+        if "gps" in todo:
+            result.gps, result.gps_ran = loaded.gps, True
         if "thumb" in todo:
             with _Timer(result, "thumb"):
                 save_thumbnail(img, task.thumb_path)
@@ -419,6 +431,13 @@ def save(conn: sqlite3.Connection, results: list[Result]) -> None:
                 "UPDATE files SET hash = ?, taken_at = ?, date_source = ? WHERE id = ?",
                 (r.hash, r.taken_at, r.date_source, r.file_id),
             )
+        if r.gps_ran:
+            lat, lon = r.gps or (None, None)
+            conn.execute(
+                "UPDATE files SET lat = ?, lon = ?, city = NULL, state = NULL, country = NULL"
+                " WHERE id = ?",
+                (lat, lon, r.file_id),
+            )
         if r.width:
             conn.execute(
                 "UPDATE files SET width = ?, height = ? WHERE id = ?",
@@ -451,6 +470,7 @@ class IndexStats:
     seconds: float = 0.0
     stage_seconds: dict[str, float] = field(default_factory=dict)  # summed over workers
     grouping: GroupingStats | None = None
+    places: int = 0  # files whose place was named in this run
     interrupted: bool = False
 
 
@@ -575,6 +595,10 @@ def index(
             if on_main_thread:
                 signal.signal(signal.SIGINT, previous)
         stats.interrupted = stop.is_set() and stats.processed < stats.pending
+        places_started = time.perf_counter()
+        stats.places = resolve_places(conn, (models or models_dir()) / PLACES_FILE)
+        if stats.places:
+            stats.stage_seconds["places"] = time.perf_counter() - places_started
         if not stats.interrupted and (only is None or "faces" in only):
             grouping_started = time.perf_counter()
             stats.grouping = group_faces(conn, settings)

@@ -4,13 +4,17 @@ CLIP is not downloaded: it is produced by tools/export_clip.py (needs torch).
 Usage: uv run python tools/fetch_models.py
 """
 
+import gzip
 import hashlib
+import io
 import urllib.request
+import zipfile
 from pathlib import Path
 
 MODELS_DIR = Path(__file__).resolve().parents[1] / "models"
 ZOO = "https://github.com/opencv/opencv_zoo/raw/main/models"
 RAPIDOCR = "https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.9.2/onnx/PP-OCRv5"
+GEONAMES = "https://download.geonames.org/export/dump"
 CLIP_SOURCE = (
     "https://huggingface.co/laion/CLIP-ViT-B-32-xlm-roberta-base-laion5B-s13B-b90k"
     " (tools/export_clip.py)"
@@ -55,6 +59,7 @@ MODELS = [
         None,
         False,
     ),
+    ("places.tsv.gz", "CC-BY-4.0 (GeoNames)", f"{GEONAMES}/cities500.zip", None, False),
 ]
 
 HEADER = """# Modelos — licenças e origem
@@ -75,8 +80,38 @@ def sha256(path: Path) -> str:
     return h.hexdigest()
 
 
+def build_places(target: Path) -> None:
+    """GeoNames cities500 -> gzip TSV: city, state, country, lat, lon (CC-BY 4.0)."""
+
+    def text(name: str) -> list[str]:
+        raw = urllib.request.urlopen(f"{GEONAMES}/{name}", timeout=120).read()
+        return raw.decode("utf-8").splitlines()
+
+    countries = {
+        cols[0]: cols[4]
+        for line in text("countryInfo.txt")
+        if line and not line.startswith("#")
+        for cols in [line.split("\t")]
+    }
+    states = {c[0]: c[1] for line in text("admin1CodesASCII.txt") for c in [line.split("\t")]}
+    archive = urllib.request.urlopen(f"{GEONAMES}/cities500.zip", timeout=300).read()
+    with zipfile.ZipFile(io.BytesIO(archive)) as zf, zf.open("cities500.txt") as fh:
+        rows = []
+        for line in io.TextIOWrapper(fh, encoding="utf-8"):
+            cols = line.rstrip("\n").split("\t")
+            name, lat, lon, country, admin1 = cols[1], cols[4], cols[5], cols[8], cols[10]
+            state = states.get(f"{country}.{admin1}", "")
+            rows.append(f"{name}\t{state}\t{countries.get(country, country)}\t{lat}\t{lon}\n")
+    rows.sort()  # deterministic output
+    with gzip.GzipFile(target, "wb", mtime=0) as out:
+        out.write("".join(rows).encode("utf-8"))
+    print(f"places.tsv.gz: {len(rows)} lugares")
+
+
 def main() -> None:
     MODELS_DIR.mkdir(exist_ok=True)
+    if not (MODELS_DIR / "places.tsv.gz").exists():
+        build_places(MODELS_DIR / "places.tsv.gz")
     rows = []
     for name, license_id, url, expected, downloadable in MODELS:
         target = MODELS_DIR / name

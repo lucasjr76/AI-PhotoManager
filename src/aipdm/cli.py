@@ -305,7 +305,7 @@ def cmd_doctor(_args: argparse.Namespace) -> int:
         return 1
     for line in licenses.read_text(encoding="utf-8").splitlines():
         cells = [c.strip() for c in line.strip("|").split("|")]
-        if len(cells) != 4 or not cells[0].endswith((".onnx", ".json")):
+        if len(cells) != 4 or not cells[0].endswith((".onnx", ".json", ".gz")):
             continue
         name, license_id, _source, expected = cells
         file = models / name

@@ -60,8 +60,10 @@ def test_full_pipeline_offline(text_dir: Path, tmp_path: Path, no_network: None)
     stats = index(text_dir, db_path, workers=1)
     assert stats.errors == 1  # only the broken jpeg
     files = rows(db_path)
-    assert files["camera.jpg"]["stages_done"] == "date,thumb,faces,clip,ocr"
-    assert files["WhatsApp Stickers/STK-20230101-WA0002.webp"]["stages_done"] == "date,thumb,clip"
+    assert files["camera.jpg"]["stages_done"] == "date,gps,thumb,faces,clip,ocr"
+    assert (
+        files["WhatsApp Stickers/STK-20230101-WA0002.webp"]["stages_done"] == "date,gps,thumb,clip"
+    )
     assert files["WhatsApp Documents/escaneado.pdf"]["stages_done"] == "date,thumb,text,ocr"
 
     conn = db.connect(db_path)
@@ -97,7 +99,7 @@ def test_phase1_database_gets_only_missing_stages(text_dir: Path, tmp_path: Path
 def test_only_limits_heavy_stages(sample_dir: Path, tmp_path: Path) -> None:
     db_path = tmp_path / "dados" / "only.sqlite"
     index(sample_dir, db_path, workers=1, only=frozenset({"clip"}))
-    assert rows(db_path)["camera.jpg"]["stages_done"] == "date,thumb,clip"
+    assert rows(db_path)["camera.jpg"]["stages_done"] == "date,gps,thumb,clip"
 
 
 def test_full_pipeline_is_read_only(text_dir: Path, tmp_path: Path) -> None:
