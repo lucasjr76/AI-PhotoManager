@@ -151,7 +151,7 @@ CREATE VIRTUAL TABLE texts USING fts5(
 
 1. **Scan:** percorre a raiz (segue symlinks: não; **pastas ocultas** — nome iniciado por `.`, ex. `.Links`, `.Statuses` — são ignoradas e, se já estiverem no banco, removidas dele), compara `size+mtime` com o banco; novos/alterados → `pending`; ausentes → `missing` (não apaga, permite reaparecer).
 2. **Estágios por arquivo**, cada um registrado em `stages_done` para retomada: `date → thumb → faces → clip → ocr/text`.
-3. Execução em pool de processos (`os.cpu_count() - 1`), lotes para CLIP. Escrita no SQLite apenas pelo processo principal, a cada lote de 8 arquivos concluído (fila limitada a 2 lotes por worker; um arquivo lento não deixa os outros workers ociosos). Cada worker carrega os modelos uma vez (~0,5 GB de RAM por worker) e usa 1 thread por sessão de inferência.
+3. Execução em pool de processos (`os.cpu_count() - 1`, no máximo 8 — cada worker ocupa ~0,5 GB de RAM), lotes para CLIP. Escrita no SQLite apenas pelo processo principal, a cada lote de 8 arquivos concluído (fila limitada a 2 lotes por worker; um arquivo lento não deixa os outros workers ociosos). Cada worker carrega os modelos uma vez (~0,5 GB de RAM por worker) e usa 1 thread por sessão de inferência.
    Estágios por tipo: imagem `date,thumb,faces,clip,ocr`; PDF `date,thumb,text,ocr`; DOCX `date,text`. Figurinhas pulam `faces` e `ocr`. `--only faces,clip,ocr` restringe os estágios pesados; bancos antigos recebem só os estágios que faltam.
 4. Erros por arquivo não param a indexação (`status='error'`, mensagem gravada).
 5. Progresso emitido como eventos (CLI: barra; UI: SSE ou polling).

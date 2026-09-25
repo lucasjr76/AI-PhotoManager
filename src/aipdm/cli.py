@@ -3,7 +3,6 @@
 import argparse
 import hashlib
 import logging
-import os
 import sqlite3
 import sys
 from importlib.metadata import PackageNotFoundError, version
@@ -240,9 +239,8 @@ def cmd_ui(args: argparse.Namespace) -> int:
         path = paths.db_path_for(Path(args.pasta))
     else:
         path = Path(args.db) if args.db else paths.latest_db()
-    if path is None or not path.exists():
-        print("Nenhum banco encontrado. Rode primeiro: aipdm index <pasta>", file=sys.stderr)
-        return 1
+    if path is not None and not path.exists():
+        path = None  # the welcome screen lets the user pick and index a folder
     serve(path, browser=args.browser)
     return 0
 
@@ -331,7 +329,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("index", help="indexa (ou re-varre) uma pasta, sem alterá-la")
     p.add_argument("pasta")
     p.add_argument("--db", help="caminho do banco (padrão: diretório de dados)")
-    p.add_argument("--workers", type=int, default=max(1, (os.cpu_count() or 2) - 1))
+    p.add_argument("--workers", type=int, default=scanner.default_workers())
     p.add_argument("--force", action="store_true", help="reprocessa todos os arquivos")
     p.add_argument(
         "--only",

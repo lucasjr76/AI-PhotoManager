@@ -8,6 +8,7 @@ import logging
 import os
 import signal
 import sqlite3
+import threading
 import time
 import zipfile
 from collections.abc import Callable, Iterator
@@ -453,6 +454,12 @@ class IndexStats:
     interrupted: bool = False
 
 
+def default_workers() -> int:
+    # ponytail: capped at 8 because each worker holds ~0.5 GB of models; make it
+    # RAM-aware if machines with many cores but little memory show up.
+    return max(1, min((os.cpu_count() or 2) - 1, 8))
+
+
 def _ignore_sigint() -> None:
     signal.signal(signal.SIGINT, signal.SIG_IGN)
 
@@ -496,7 +503,10 @@ def index(
     face_settings: FaceSettings | None = None,
     models: Path | None = None,
     progress: Callable[[int, int], None] | None = None,
+    stop: threading.Event | None = None,
 ) -> IndexStats:
+    """`stop`: set it (e.g. from the UI) to finish the chunks in flight and return early.
+    On the main thread, Ctrl+C sets it too."""
     started = time.monotonic()
     root = root.resolve()
     settings = face_settings or FaceSettings()
@@ -511,14 +521,14 @@ def index(
         )
         work = partial(process_chunk, config=config)
 
-        # Ctrl+C: finish the current batch, save it, stop cleanly.
-        stop = False
-
-        def request_stop(_sig: int, _frame: object) -> None:
-            nonlocal stop
-            stop = True
-
-        previous = signal.signal(signal.SIGINT, request_stop)
+        # Ctrl+C: finish the chunks in flight, save them, stop cleanly.
+        stop = stop or threading.Event()
+        on_main_thread = threading.current_thread() is threading.main_thread()
+        previous = (
+            signal.signal(signal.SIGINT, lambda _sig, _frame: stop.set())
+            if on_main_thread
+            else None
+        )
         pool = (
             ProcessPoolExecutor(workers, get_context("spawn"), initializer=_ignore_sigint)
             if workers > 1
@@ -541,7 +551,7 @@ def index(
 
             if pool is None:
                 for chunk in chunks:
-                    if stop:
+                    if stop.is_set():
                         break
                     handle(work(chunk))
             else:
@@ -549,7 +559,7 @@ def index(
                 # PDF) never leaves the other workers idle waiting for a batch to end.
                 in_flight: set[Future[list[Result]]] = set()
                 while True:
-                    while not stop and len(in_flight) < IN_FLIGHT_PER_WORKER * workers:
+                    while not stop.is_set() and len(in_flight) < IN_FLIGHT_PER_WORKER * workers:
                         queued = next(chunks, None)
                         if queued is None:
                             break
@@ -562,8 +572,9 @@ def index(
         finally:
             if pool:
                 pool.shutdown(cancel_futures=True)
-            signal.signal(signal.SIGINT, previous)
-        stats.interrupted = stop and stats.processed < stats.pending
+            if on_main_thread:
+                signal.signal(signal.SIGINT, previous)
+        stats.interrupted = stop.is_set() and stats.processed < stats.pending
         if not stats.interrupted and (only is None or "faces" in only):
             grouping_started = time.perf_counter()
             stats.grouping = group_faces(conn, settings)
