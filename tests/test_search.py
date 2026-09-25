@@ -166,3 +166,28 @@ def test_date_counts(conn: sqlite3.Connection) -> None:
     assert months == {"2023-06": 1, "2023-03": 1, "2023-01": 1, "2022-12": 1}
     maria = conn.execute("SELECT id FROM people WHERE name = 'Maria Souza'").fetchone()[0]
     assert dict(date_counts(conn, Query(), (maria,))) == {"2023-06": 1, "2023-01": 1}
+
+
+def test_place_filter_counts_and_label(conn: sqlite3.Connection) -> None:
+    from aipdm.core.search import place_counts
+
+    conn.execute(
+        "UPDATE files SET city = 'Florianópolis', state = 'Santa Catarina', country = 'Brazil'"
+        " WHERE rel_path IN ('praia1.jpg', 'praia2.jpg')"
+    )
+    conn.execute(
+        "UPDATE files SET city = 'Curitiba', state = 'Paraná', country = 'Brazil'"
+        " WHERE rel_path = 'bolo.jpg'"
+    )
+    conn.execute("UPDATE files SET city = '' WHERE rel_path = 'placa.jpg'")  # GPS, no town
+    assert place_counts(conn, Query()) == [
+        ("Brazil", "Paraná", "Curitiba", 1),
+        ("Brazil", "Santa Catarina", "Florianópolis", 2),
+    ]
+    got = search(conn, Query(city="Florianópolis", state="Santa Catarina", country="Brazil"), None)
+    assert set(paths(got.hits)) == {"praia1.jpg", "praia2.jpg"}
+    assert got.hits[0].place == "Florianópolis, Santa Catarina, Brazil"
+    assert search(conn, Query(state="Paraná"), None).total == 1
+    assert (
+        next(h for h in search(conn, Query(), None).hits if h.rel_path == "placa.jpg").place is None
+    )

@@ -167,3 +167,4 @@ progress { width: 100%; height: 12px; }
 .node.month { text-transform: capitalize; }
 .count { color: var(--muted); font-variant-numeric: tabular-nums; }
 .browse-main h1 { margin: 0; }
+.place { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }

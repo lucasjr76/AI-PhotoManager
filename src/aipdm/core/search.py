@@ -25,6 +25,10 @@ class Query:
     order: str = "relevance"  # or "date"
     limit: int = 20
     offset: int = 0  # paging: skip this many results
+    # Location filter, from the "Por local" tree: each level optional (None = any).
+    country: str | None = None
+    state: str | None = None
+    city: str | None = None
 
 
 @dataclass(frozen=True)
@@ -36,6 +40,7 @@ class Hit:
     score: float  # 0..1, higher is better (1.0 when there is no text)
     page: int | None = None
     snippet: str | None = None
+    place: str | None = None  # "city, state, country" when the photo has GPS
 
 
 @dataclass
@@ -47,6 +52,30 @@ class Results:
     # With text AND filters (people, dates, kinds): how many files match the filters
     # alone, so the UI can say "5 of 269" instead of silently narrowing.
     without_text: int | None = None
+
+
+HIT_COLUMNS = "f.id, f.rel_path, f.kind, f.taken_at, f.city, f.state, f.country"
+
+
+def _hit(
+    row: sqlite3.Row | tuple[object, ...],
+    score: float,
+    page: int | None = None,
+    snippet: str | None = None,
+) -> Hit:
+    place = ", ".join(str(p) for p in row[4:7] if p) or None
+    return Hit(row[0], row[1], row[2], row[3], score, page, snippet, place)  # type: ignore[arg-type]
+
+
+def place_counts(conn: sqlite3.Connection, query: Query) -> list[tuple[str, str, str, int]]:
+    """(country, state, city, count) of located files under the query's filters."""
+    where, params = _filters(query, query.people_ids)
+    rows = conn.execute(
+        f"SELECT f.country, f.state, f.city, COUNT(*) FROM files f WHERE {where}"
+        " AND f.city IS NOT NULL AND f.city != '' GROUP BY 1, 2, 3 ORDER BY 1, 2, 3",
+        params,
+    )
+    return [(r[0], r[1], r[2], int(r[3])) for r in rows]
 
 
 def fts_query(text: str) -> str:
@@ -76,6 +105,10 @@ def _filters(query: Query, people_ids: tuple[int, ...]) -> tuple[str, list[objec
     if query.date_to:
         conds.append("substr(f.taken_at, 1, 10) <= ?")
         params.append(query.date_to)
+    for column in ("country", "state", "city"):
+        if (value := getattr(query, column)) is not None:
+            conds.append(f"f.{column} = ?")  # column name from a fixed tuple, never user input
+            params.append(value)
     for person_id in people_ids:
         conds.append(
             "EXISTS (SELECT 1 FROM faces fa WHERE fa.file_id = f.id AND fa.person_id = ?"
@@ -99,7 +132,7 @@ def _files(conn: sqlite3.Connection, ids: list[int]) -> dict[int, sqlite3.Row]:
     for start in range(0, len(ids), 900):  # SQLite parameter limit
         part = ids[start : start + 900]
         marks = ",".join("?" * len(part))
-        sql = f"SELECT id, rel_path, kind, taken_at FROM files WHERE id IN ({marks})"
+        sql = f"SELECT {HIT_COLUMNS} FROM files f WHERE f.id IN ({marks})"
         for row in conn.execute(sql, part):
             rows[row[0]] = row
     return rows
@@ -162,11 +195,11 @@ def _plain(
     """Files matching the filters, newest first: (one page, total)."""
     where, params = _filters(query, people_ids)
     rows = conn.execute(
-        f"SELECT f.id, f.rel_path, f.kind, f.taken_at FROM files f WHERE {where}"
+        f"SELECT {HIT_COLUMNS} FROM files f WHERE {where}"
         " ORDER BY f.taken_at DESC, f.id DESC LIMIT ? OFFSET ?",
         [*params, query.limit, query.offset],
     )
-    return [Hit(r[0], r[1], r[2], r[3], 1.0) for r in rows], _count(conn, query, people_ids)
+    return [_hit(r, 1.0) for r in rows], _count(conn, query, people_ids)
 
 
 def date_counts(
@@ -210,7 +243,7 @@ def search(conn: sqlite3.Connection, query: Query, encode_text: TextEncoder | No
         found = _fts(conn, text, where, params)
         norm = _minmax({f: v[0] for f, v in found.items()})
         mentions = [
-            Hit(f, row[1], row[2], row[3], norm[f], found[f][1], found[f][2])
+            _hit(row, norm[f], found[f][1], found[f][2])
             for f, row in _files(conn, list(found)).items()
         ]
         return Results(photos, total, person[1], _rank(mentions, query)[: query.limit])
@@ -227,7 +260,7 @@ def search(conn: sqlite3.Connection, query: Query, encode_text: TextEncoder | No
             file_id, 0.0
         )
         page, snip = (fts[file_id][1], fts[file_id][2]) if file_id in fts else (None, None)
-        hits.append(Hit(file_id, row[1], row[2], row[3], score, page, snip))
+        hits.append(_hit(row, score, page, snip))
     filtered = bool(query.people_ids or query.date_from or query.date_to or query.kinds)
     without_text = _count(conn, query, query.people_ids) if filtered else None
     ranked = _rank(hits, query)

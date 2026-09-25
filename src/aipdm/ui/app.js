@@ -288,7 +288,8 @@ function photoCard(x) {
   return h("div", { class: "card photo", title: `${x.rel_path}\nDuplo clique abre a foto`, ondblclick: () => openFile(x.file_id) },
     h("img", { src: `/api/files/${x.file_id}/thumb`, loading: "lazy", alt: "" }),
     h("div", { class: "muted small" }, fmtDate(x.taken_at)),
-    x.snippet ? snippet(x.snippet) : null);
+    x.place ? h("div", { class: "muted small place", title: x.place }, `📍 ${x.place.split(", ")[0]}`) : null,
+    x.snippet && !(x.place && x.snippet.includes(x.place.split(", ")[0])) ? snippet(x.snippet) : null);
 }
 
 function docRow(x) {
@@ -343,6 +344,7 @@ function searchParams(st) {
   if (st.to) q.set("date_to", st.to);
   (st.people || []).forEach((p) => q.append("person", p.id));
   (st.kinds || []).forEach((k) => q.append("kind", k));
+  for (const key of ["country", "state", "city"]) if (st[key] != null) q.set(key, st[key]);
   return q;
 }
 
@@ -414,7 +416,7 @@ const monthName = (ym) => MONTHS[Number(ym.slice(5, 7)) - 1];
 const lastDay = (ym) => new Date(Number(ym.slice(0, 4)), Number(ym.slice(5, 7)), 0).getDate();
 
 // Browsing state survives switching tabs.
-const browseState = { title: "Todas as fotos", people: [], from: "", to: "", stickers: false };
+const browseState = { title: "Todas as fotos", people: [], from: "", to: "", stickers: false, country: null, state: null, city: null };
 
 async function screenBrowse() {
   await refreshPeople();
@@ -423,7 +425,7 @@ async function screenBrowse() {
   const side = h("aside", { class: "tree" });
 
   const show = (title, filters) => {
-    Object.assign(st, { title, people: [], from: "", to: "" }, filters);
+    Object.assign(st, { title, people: [], from: "", to: "", country: null, state: null, city: null }, filters);
     for (const el of side.querySelectorAll(".node.active")) el.classList.remove("active");
     draw();
   };
@@ -441,8 +443,17 @@ async function screenBrowse() {
       y.months.map((m) => node(monthName(m.month), m.count,
         { title: `${prefix}${monthName(m.month)} de ${y.year}`, people, from: `${m.month}-01`, to: `${m.month}-${lastDay(m.month)}` }, "month"))));
 
+  const placeNodes = (countries) => countries.map((c) =>
+    h("details", {},
+      h("summary", {}, node(c.country, c.count, { title: c.country, country: c.country })),
+      c.states.map((s) => h("details", {},
+        h("summary", {}, node(s.state || "(sem estado)", s.count, { title: `${s.state}, ${c.country}`, country: c.country, state: s.state })),
+        s.cities.map((x) => node(x.city, x.count,
+          { title: `${x.city}, ${s.state}`, country: c.country, state: s.state, city: x.city }, "city"))))));
+
   const drawTree = async () => {
-    const tree = await api(`/api/tree?stickers=${st.stickers}`);
+    const [tree, places] = await Promise.all([
+      api(`/api/tree?stickers=${st.stickers}`), api(`/api/places?stickers=${st.stickers}`)]);
     const named = people.filter((p) => p.name && !p.hidden).sort((a, b) => a.name.localeCompare(b.name, "pt-BR"));
     const personNodes = named.map((p) => {
       const d = h("details", {}, h("summary", {}, node(p.name, p.files, { title: p.name, people: [p] })));
@@ -458,6 +469,8 @@ async function screenBrowse() {
       node("Todas as fotos", tree.total, { title: "Todas as fotos" }, "all"),
       h("h3", {}, "Por ano"), ...yearNodes(tree, [], ""),
       tree.undated ? h("div", { class: "muted small" }, `${tree.undated} sem data`) : null,
+      h("h3", {}, "Por local"),
+      places.length ? placeNodes(places) : h("div", { class: "muted small" }, "Nenhuma foto com localização (GPS) nesta pasta."),
       h("h3", {}, "Por pessoa"),
       personNodes.length ? personNodes : h("div", { class: "muted small" }, "Dê nome às pessoas na aba Pessoas."),
       h("label", { class: "small" }, h("input", { type: "checkbox", checked: st.stickers,

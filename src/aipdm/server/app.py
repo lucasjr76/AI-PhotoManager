@@ -16,6 +16,7 @@ import time
 from collections.abc import Awaitable, Callable, Iterator
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
+from typing import Any
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.exceptions import RequestValidationError
@@ -341,6 +342,9 @@ def create_app(
         order: str = "relevance",
         limit: int = 120,
         offset: int = 0,
+        country: str | None = None,
+        region: str | None = Query(default=None, alias="state"),  # "state" is taken below
+        city: str | None = None,
         c: sqlite3.Connection = Conn,
     ) -> dict[str, object]:
         if text.strip():
@@ -357,6 +361,9 @@ def create_app(
             order="date" if order == "date" else "relevance",
             limit=max(1, min(limit, 500)),
             offset=max(0, offset),
+            country=country,
+            state=region,
+            city=city,
         )
         results = searching.search(c, query, state.encoder)
         return {
@@ -391,6 +398,26 @@ def create_app(
             "undated": undated,
             "years": list(years.values()),
         }
+
+    @app.get("/api/places")
+    def places(stickers: bool = False, c: sqlite3.Connection = Conn) -> list[dict[str, Any]]:
+        """Located photos as a country > state > city tree with counts, biggest first."""
+        query = searching.Query(kinds=("image",), stickers=stickers)
+        countries: list[dict[str, Any]] = []
+        for country, state, city, n in searching.place_counts(c, query):  # sorted by place
+            if not countries or countries[-1]["country"] != country:
+                countries.append({"country": country, "count": 0, "states": []})
+            states = countries[-1]["states"]
+            if not states or states[-1]["state"] != state:
+                states.append({"state": state, "count": 0, "cities": []})
+            countries[-1]["count"] += n
+            states[-1]["count"] += n
+            states[-1]["cities"].append({"city": city, "count": n})
+        for node in countries:
+            node["states"].sort(key=lambda x: -x["count"])
+            for st in node["states"]:
+                st["cities"].sort(key=lambda x: -x["count"])
+        return sorted(countries, key=lambda x: -x["count"])
 
     # --- folders and indexing -------------------------------------------------
 

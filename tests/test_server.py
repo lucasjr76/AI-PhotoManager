@@ -247,3 +247,31 @@ def test_search_paging_and_tree(db_path: Path) -> None:
     assert [y["year"] for y in tree["years"]] == ["2023", "2022", "2019"]
     assert tree["years"][0]["months"] == [{"month": "2023-05", "count": 1}]
     assert c.get("/api/tree", params={"stickers": True}).json()["total"] == 4
+
+
+def test_places_tree(db_path: Path) -> None:
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "UPDATE files SET city = 'Florianópolis', state = 'Santa Catarina', country = 'Brazil'"
+        " WHERE rel_path = 'camera.jpg'"
+    )
+    conn.commit()
+    conn.close()
+    c = make_client(db_path)
+    assert c.get("/api/places").json() == [
+        {
+            "country": "Brazil",
+            "count": 1,
+            "states": [
+                {
+                    "state": "Santa Catarina",
+                    "count": 1,
+                    "cities": [{"city": "Florianópolis", "count": 1}],
+                }
+            ],
+        }
+    ]
+    got = c.get("/api/search", params={"city": "Florianópolis"}).json()
+    assert [h["place"] for h in got["hits"]] == ["Florianópolis, Santa Catarina, Brazil"]
+    assert c.get("/api/search", params={"state": "Santa Catarina"}).json()["total"] == 1
+    assert c.get("/api/search", params={"state": "Paraná"}).json()["total"] == 0
