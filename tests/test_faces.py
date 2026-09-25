@@ -7,10 +7,11 @@ import numpy as np
 import pytest
 
 from aipdm.core import db
-from aipdm.core.faces import DetectedFace, FaceSettings, group_faces, normalize
+from aipdm.core.faces import DetectedFace, FaceSettings, group_faces, normalize, reset_groups
 from aipdm.core.scanner import _save_faces
 
 SETTINGS = FaceSettings(t_auto=0.8, t_suggest=0.6, cluster_eps=0.1, cluster_min_samples=3)
+
 RNG = np.random.default_rng(0)
 IDENTITIES = normalize(RNG.normal(size=(3, 128)).astype(np.float32))
 
@@ -147,3 +148,23 @@ def test_reprocessing_a_file_keeps_user_labels(conn: sqlite3.Connection) -> None
         ("12,11,98,101", person, "user"),
         ("300,300,80,80", None, None),
     ]
+
+
+def test_reset_groups_keeps_names_and_user_decisions(conn: sqlite3.Connection) -> None:
+    group = [add_face(conn, near(IDENTITIES[0], 0.99)) for _ in range(3)]
+    other = [add_face(conn, near(IDENTITIES[1], 0.99)) for _ in range(3)]
+    group_faces(conn, SETTINGS)
+    named = person_of(conn, group[0])[0]
+    conn.execute("UPDATE people SET name = 'Maria' WHERE id = ?", (named,))
+    unnamed = person_of(conn, other[0])[0]
+    conn.execute("UPDATE faces SET assign_source = 'user' WHERE id = ?", (other[1],))
+    auto = add_face(conn, near(IDENTITIES[0], 0.95))
+    group_faces(conn, SETTINGS)
+    assert person_of(conn, auto) == (named, "auto")
+
+    reset_groups(conn)
+
+    assert person_of(conn, group[0]) == (named, "cluster")  # named group untouched
+    assert person_of(conn, auto) == (None, None)  # automatic assignment undone
+    assert person_of(conn, other[0]) == (None, None)  # unnamed group undone
+    assert person_of(conn, other[1]) == (unnamed, "user")  # user decision kept

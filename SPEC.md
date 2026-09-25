@@ -151,7 +151,7 @@ CREATE VIRTUAL TABLE texts USING fts5(
 
 1. **Scan:** percorre a raiz (segue symlinks: não; **pastas ocultas** — nome iniciado por `.`, ex. `.Links`, `.Statuses` — são ignoradas e, se já estiverem no banco, removidas dele), compara `size+mtime` com o banco; novos/alterados → `pending`; ausentes → `missing` (não apaga, permite reaparecer).
 2. **Estágios por arquivo**, cada um registrado em `stages_done` para retomada: `date → thumb → faces → clip → ocr/text`.
-3. Execução em pool de processos (`os.cpu_count() - 1`), lotes para CLIP. Escrita no SQLite apenas pelo processo principal. Cada worker carrega os modelos uma vez (~0,5 GB de RAM por worker) e usa 1 thread por sessão de inferência.
+3. Execução em pool de processos (`os.cpu_count() - 1`), lotes para CLIP. Escrita no SQLite apenas pelo processo principal, a cada lote de 8 arquivos concluído (fila limitada a 2 lotes por worker; um arquivo lento não deixa os outros workers ociosos). Cada worker carrega os modelos uma vez (~0,5 GB de RAM por worker) e usa 1 thread por sessão de inferência.
    Estágios por tipo: imagem `date,thumb,faces,clip,ocr`; PDF `date,thumb,text,ocr`; DOCX `date,text`. Figurinhas pulam `faces` e `ocr`. `--only faces,clip,ocr` restringe os estágios pesados; bancos antigos recebem só os estágios que faltam.
 4. Erros por arquivo não param a indexação (`status='error'`, mensagem gravada).
 5. Progresso emitido como eventos (CLI: barra; UI: SSE ou polling).
@@ -168,7 +168,7 @@ Imagens são reduzidas para no máx. 1600 px no lado maior antes de rostos/OCR (
   - `T_suggest ≤ score < T_auto` → `suggested`, entra na fila "É a Maria?"
   - abaixo → re-clustering apenas dos órfãos.
 - A comparação com `T_auto` usa todas as pessoas (com ou sem nome), para rostos novos não fragmentarem grupos existentes; `suggested` só para pessoas com nome. Rostos `suggested` não contam como a pessoa na busca.
-- Ponto de partida: limiar de cosseno do SFace recomendado pelo OpenCV (0.363) para `T_suggest`; `T_auto` = 0.5; `eps` do DBSCAN = 0.5 (similaridade ≥ 0.5), `min_samples` = 3. `T_auto` e `T_suggest` **devem ser calibrados** com `tools/calibrate_faces.py` na pasta de teste real (relatar precisão/recall).
+- Valores provisórios (medidos na pasta real, 8.599 rostos): `eps` do DBSCAN = 0.3 (similaridade ≥ 0.7), `min_samples` = 3, `T_auto` = 0.7, `T_suggest` = 0.5. Com `eps` 0.5 (≈ limiar 0.363 do OpenCV) 80% dos rostos encadearam num único grupo. `aipdm faces regroup` refaz os grupos sem nome com os limiares atuais (mantém nomes, decisões do usuário e negativas). `T_auto` e `T_suggest` **devem ser calibrados** com `tools/calibrate_faces.py` na pasta de teste real (relatar precisão/recall).
 - Ações do usuário: nomear, renomear, mesclar pessoas, remover rosto de uma pessoa, marcar "não é esta pessoa" (gravar negativa para não sugerir de novo), ocultar pessoa.
 - Ações do usuário (`assign_source='user'`) nunca são sobrescritas por processamento automático.
 
@@ -180,7 +180,7 @@ Entrada: `people_ids[]` (AND — todas na mesma foto), `date_from`, `date_to`, `
 2. Se `text` presente, dois sinais:
    - **CLIP:** similaridade entre embedding do texto e das imagens candidatas.
    - **FTS5:** `bm25` sobre OCR/texto de documentos.
-3. Normalizar os dois scores para 0..1 e combinar (peso inicial 0.5/0.5, ajustável). CLIP abaixo de um limiar mínimo não entra (inicial: similaridade 0.2; calibrar).
+3. Normalizar os dois scores para 0..1 e combinar (peso inicial 0.5/0.5, ajustável). CLIP abaixo de um limiar mínimo não entra (inicial: similaridade 0.2; calibrar — na pasta real a mediana é ~0.10 e até consultas sem sentido chegam a 0.26, então um limiar absoluto discrimina pouco).
 4. Se o texto corresponder exatamente ao nome de uma pessoa cadastrada, tratar também como filtro de pessoa **e** buscar o nome no FTS (retorna fotos dela + documentos que a citam), apresentando em seções separadas.
 5. Ordenação padrão: relevância; alternativa: data.
 

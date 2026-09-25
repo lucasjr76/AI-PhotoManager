@@ -11,6 +11,7 @@ from pathlib import Path
 
 from aipdm.core import db, paths, scanner
 from aipdm.core.clip import ClipTextModel
+from aipdm.core.faces import FaceSettings, group_faces, reset_groups
 from aipdm.core.images import load_image
 from aipdm.core.search import Hit, Query, find_person, search
 
@@ -232,6 +233,18 @@ def cmd_people_merge(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_faces_regroup(args: argparse.Namespace) -> int:
+    conn = _open_db(args.db)
+    removed = reset_groups(conn)
+    g = group_faces(conn, FaceSettings())
+    print(f"{removed} grupos sem nome desfeitos.")
+    print(
+        f"Rostos: {g.auto} atribuídos automaticamente, {g.suggested} sugeridos, "
+        f"{g.clustered} agrupados em {g.new_people} novas pessoas, {g.unassigned} sem grupo"
+    )
+    return 0
+
+
 def cmd_faces_export(args: argparse.Namespace) -> int:
     conn = _open_db(args.db)
     root = Path(db.get_meta(conn, "root_path") or "")
@@ -350,6 +363,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("dir_saida")
     p.add_argument("--db")
     p.set_defaults(func=cmd_faces_export)
+    p = faces.add_parser("regroup", help="refaz os grupos sem nome com os limiares atuais")
+    p.add_argument("--db")
+    p.set_defaults(func=cmd_faces_regroup)
 
     p = sub.add_parser("doctor", help="verifica modelos, versões e licenças")
     p.set_defaults(func=cmd_doctor)

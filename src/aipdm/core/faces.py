@@ -31,10 +31,12 @@ Embedding = NDArray[np.float32]
 class FaceSettings:
     min_score: float = 0.8
     min_size: int = 40  # pixels, in original image coordinates
-    # Starting points; calibrate with tools/calibrate_faces.py (OpenCV suggests 0.363).
-    t_auto: float = 0.5
-    t_suggest: float = 0.363
-    cluster_eps: float = 0.5  # cosine distance, i.e. similarity >= 0.5
+    # Provisional, from the real test folder: eps 0.5 chained 80% of faces into one
+    # group; 0.3 keeps the 4 most frequent people apart. Calibrate with
+    # tools/calibrate_faces.py once people are named (OpenCV's 0.363 is far too loose here).
+    t_auto: float = 0.7  # = 1 - cluster_eps, same bar as joining a cluster
+    t_suggest: float = 0.5
+    cluster_eps: float = 0.3  # cosine distance, i.e. similarity >= 0.7
     cluster_min_samples: int = 3
     cluster_block: int = DEFAULT_BLOCK
 
@@ -195,6 +197,27 @@ def group_faces(conn: sqlite3.Connection, settings: FaceSettings) -> GroupingSta
     stats.unassigned = int((labels == -1).sum())
     conn.commit()
     return stats
+
+
+def reset_groups(conn: sqlite3.Connection) -> int:
+    """Undo automatic grouping of unnamed people so it can be redone with new settings.
+
+    Named people, 'user' assignments and negatives are kept. Returns people removed.
+    """
+    conn.execute(
+        "UPDATE faces SET person_id = NULL, assign_source = NULL, assign_score = NULL"
+        " WHERE assign_source != 'user' AND person_id IN (SELECT id FROM people WHERE name IS NULL)"
+    )
+    conn.execute(
+        "UPDATE faces SET person_id = NULL, assign_source = NULL, assign_score = NULL"
+        " WHERE assign_source IN ('auto', 'suggested')"
+    )
+    removed = conn.execute(
+        "DELETE FROM people WHERE name IS NULL"
+        " AND id NOT IN (SELECT person_id FROM faces WHERE person_id IS NOT NULL)"
+    ).rowcount
+    conn.commit()
+    return removed
 
 
 def _negative_cells(

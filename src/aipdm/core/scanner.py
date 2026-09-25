@@ -11,7 +11,7 @@ import sqlite3
 import time
 import zipfile
 from collections.abc import Callable, Iterator
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, Future, ProcessPoolExecutor, wait
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from functools import cache, partial
@@ -45,7 +45,7 @@ KIND_STAGES = {
 BASE_STAGES = frozenset({"date", "thumb", "text"})
 HEAVY_STAGES = ("faces", "clip", "ocr")
 STICKER_SKIPS = frozenset({"faces", "ocr"})
-BATCH_SIZE = 64  # files per worker between commits
+IN_FLIGHT_PER_WORKER = 2  # queued chunks per worker; bounds memory and Ctrl+C latency
 CHUNK_SIZE = 8  # files per worker call; CLIP runs batched inside a chunk
 HASH_CHUNK = 1 << 20
 
@@ -525,14 +525,10 @@ def index(
             else None
         )
         try:
-            for batch in batched(tasks, BATCH_SIZE * max(workers, 1)):
-                if stop:
-                    break
-                chunks = list(batched(batch, CHUNK_SIZE))
-                results = [
-                    r for rs in (pool.map(work, chunks) if pool else map(work, chunks)) for r in rs
-                ]
-                save(conn, results)
+            chunks = iter(batched(tasks, CHUNK_SIZE))
+
+            def handle(results: list[Result]) -> None:
+                save(conn, results)  # commits: every finished chunk is durable
                 stats.processed += len(results)
                 for r in results:
                     for stage, sec in r.seconds.items():
@@ -542,6 +538,27 @@ def index(
                         log.info("erro no arquivo id=%s: %s", r.file_id, r.error)
                 if progress:
                     progress(stats.processed, stats.pending)
+
+            if pool is None:
+                for chunk in chunks:
+                    if stop:
+                        break
+                    handle(work(chunk))
+            else:
+                # Stream chunks with a bounded queue, so one slow file (a long scanned
+                # PDF) never leaves the other workers idle waiting for a batch to end.
+                in_flight: set[Future[list[Result]]] = set()
+                while True:
+                    while not stop and len(in_flight) < IN_FLIGHT_PER_WORKER * workers:
+                        queued = next(chunks, None)
+                        if queued is None:
+                            break
+                        in_flight.add(pool.submit(work, queued))
+                    if not in_flight:
+                        break
+                    finished, in_flight = wait(in_flight, return_when=FIRST_COMPLETED)
+                    for future in finished:
+                        handle(future.result())
         finally:
             if pool:
                 pool.shutdown(cancel_futures=True)
