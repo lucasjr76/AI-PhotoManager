@@ -9,6 +9,7 @@ import os
 import signal
 import sqlite3
 import time
+import zipfile
 from collections.abc import Callable, Iterator
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, field
@@ -34,11 +35,39 @@ BATCH_SIZE = 64
 HASH_CHUNK = 1 << 20
 
 
-def kind_of(name: str) -> str:
-    ext = name.rsplit(".", 1)[-1].lower() if "." in name else ""
+HEIF_BRANDS = frozenset({b"heic", b"heix", b"hevc", b"heim", b"heis", b"mif1", b"msf1"})
+
+
+def kind_of(path: Path) -> str:
+    if "." not in path.name:
+        return sniff_kind(path)
+    ext = path.name.rsplit(".", 1)[-1].lower()
     if ext in IMAGE_EXTS:
         return "image"
     return ext if ext in ("pdf", "docx") else "other"
+
+
+def sniff_kind(path: Path) -> str:
+    """Kind from the file header, for names without an extension (e.g. WhatsApp 'Sent')."""
+    try:
+        with path.open("rb") as fh:
+            head = fh.read(12)
+            if head.startswith(b"%PDF-"):
+                return "pdf"
+            if (
+                head.startswith((b"\xff\xd8\xff", b"\x89PNG", b"BM"))
+                or (head[:4] == b"RIFF" and head[8:12] == b"WEBP")
+                or (head[4:8] == b"ftyp" and head[8:12] in HEIF_BRANDS)
+            ):
+                return "image"
+            if head.startswith(b"PK\x03\x04"):
+                fh.seek(0)
+                with zipfile.ZipFile(fh) as archive:
+                    if "word/document.xml" in archive.namelist():
+                        return "docx"
+    except (OSError, zipfile.BadZipFile):
+        pass
+    return "other"
 
 
 def is_sticker(name: str) -> bool:
@@ -89,7 +118,7 @@ def scan(conn: sqlite3.Connection, root: Path, *, force: bool = False) -> ScanSt
         seen.add(rel)
         row = known.get(rel)
         name = rel.rsplit("/", 1)[-1]
-        kind = kind_of(name)
+        kind = kind_of(root / rel)
         # "other" files are only listed (SPEC section 5), so they never go to the workers.
         fresh_status = "done" if kind == "other" else "pending"
         if row is None:
@@ -99,12 +128,13 @@ def scan(conn: sqlite3.Connection, root: Path, *, force: bool = False) -> ScanSt
                 " VALUES (?, ?, ?, ?, ?, ?)",
                 (rel, kind, size, mtime, int(is_sticker(name)), fresh_status),
             )
-        elif row["size"] != size or row["mtime"] != mtime:
+        elif row["size"] != size or row["mtime"] != mtime or row["kind"] != kind:
+            # A kind change on an unchanged file means the classification rules improved.
             stats.changed += 1
             conn.execute(
-                "UPDATE files SET size = ?, mtime = ?, hash = NULL, status = ?, error = NULL,"
-                " stages_done = '' WHERE id = ?",
-                (size, mtime, fresh_status, row["id"]),
+                "UPDATE files SET kind = ?, size = ?, mtime = ?, hash = NULL, status = ?,"
+                " error = NULL, stages_done = '' WHERE id = ?",
+                (kind, size, mtime, fresh_status, row["id"]),
             )
         elif row["status"] == "missing":
             stats.reappeared += 1

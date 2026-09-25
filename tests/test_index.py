@@ -1,8 +1,11 @@
 import os
 import sqlite3
+import zipfile
 from pathlib import Path
 
 import pytest
+from conftest import make_docx, make_pdf
+from PIL import Image
 
 from aipdm.cli import main
 from aipdm.core import db
@@ -122,3 +125,57 @@ def test_migration_is_idempotent(db_path: Path) -> None:
     conn = db.connect(db_path)
     assert db.schema_version(conn) == len(db.MIGRATIONS)
     conn.close()
+
+
+@pytest.fixture
+def extensionless_dir(tmp_path: Path) -> Path:
+    root = tmp_path / "sem_extensao"
+    root.mkdir()
+    make_pdf(root / "DOC-20220823-WA0056", ["Recibo de João"])
+    make_docx(root / "PROPOSTA-BLD---50MB")
+    Image.new("RGB", (10, 10)).save(root / "004d66509d39a28a", "JPEG")
+    Image.new("RGB", (10, 10)).save(root / "semnome_png", "PNG")
+    Image.new("RGB", (10, 10)).save(root / "semnome_webp", "WEBP")
+    with zipfile.ZipFile(root / "planilha", "w") as archive:
+        archive.writestr("xl/workbook.xml", "<x/>")
+    (root / "desconhecido").write_bytes(b"qualquer coisa")
+    (root / "vazio").write_bytes(b"")
+    return root
+
+
+def test_extensionless_files_are_sniffed(extensionless_dir: Path, db_path: Path) -> None:
+    stats = index(extensionless_dir, db_path, workers=1)
+    files = rows(db_path)
+    assert {rel: r["kind"] for rel, r in files.items()} == {
+        "DOC-20220823-WA0056": "pdf",
+        "PROPOSTA-BLD---50MB": "docx",
+        "004d66509d39a28a": "image",
+        "semnome_png": "image",
+        "semnome_webp": "image",
+        "planilha": "other",
+        "desconhecido": "other",
+        "vazio": "other",
+    }
+    assert stats.errors == 0
+    pdf = files["DOC-20220823-WA0056"]
+    assert (pdf["taken_at"], pdf["date_source"]) == ("2022-08-23", "whatsapp_android")
+    conn = db.connect(db_path)
+    assert {h.rel_path for h in search_text(conn, "joao")} == {
+        "DOC-20220823-WA0056",
+        "PROPOSTA-BLD---50MB",
+    }
+    conn.close()
+
+
+def test_existing_rows_are_reclassified(extensionless_dir: Path, db_path: Path) -> None:
+    """A database built before sniffing existed picks up the new kind on the next scan."""
+    index(extensionless_dir, db_path, workers=1)
+    conn = db.connect(db_path)
+    conn.execute("UPDATE files SET kind = 'other', stages_done = '' WHERE kind != 'other'")
+    conn.commit()
+    conn.close()
+
+    stats = index(extensionless_dir, db_path, workers=1)
+    assert (stats.scan.changed, stats.processed) == (5, 5)
+    assert rows(db_path)["DOC-20220823-WA0056"]["kind"] == "pdf"
+    assert index(extensionless_dir, db_path, workers=1).processed == 0

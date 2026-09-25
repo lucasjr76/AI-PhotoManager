@@ -76,7 +76,9 @@ ai-photodocsmanager/
 | Imagem | jpg, jpeg, png, webp, heic, heif, bmp | data, thumbnail, rostos, CLIP, OCR |
 | PDF | pdf | data, texto (camada ou OCR), thumbnail da 1ª página |
 | Word | docx | data, texto |
-| Fora do MVP | mp4, opus, doc (binário), xlsx, sem extensão | apenas listados na tabela `files` com `kind='other'` (sem hash, sem processamento) |
+| Fora do MVP | mp4, opus, doc (binário), xlsx | apenas listados na tabela `files` com `kind='other'` (sem hash, sem processamento) |
+
+Arquivos **sem extensão** (ex.: `WhatsApp Documents/Sent/DOC-...-WA0056`, `.Links/<hash>`) são classificados pelo cabeçalho: `%PDF-` → pdf; JPEG/PNG/BMP/WEBP/HEIF → image; ZIP com `word/document.xml` → docx; demais → other. Se a regra de classificação mudar, a próxima varredura reclassifica e reprocessa as linhas afetadas.
 
 Figurinhas do WhatsApp (`STK-*.webp`) são indexadas com `is_sticker=1` e ficam **fora** do clustering de rostos e da busca por padrão (filtro opcional).
 
