@@ -6,6 +6,19 @@ let people = [];  // cache for names/autocomplete
 
 // --- helpers ---------------------------------------------------------------
 
+// Children may be nested arrays, strings or null/false (skipped), same rules as h().
+function kids(children) {
+  return children.flat(Infinity).filter((c) => c != null && c !== false)
+    .map((c) => (c instanceof Node ? c : document.createTextNode(String(c))));
+}
+
+// Always use this instead of el.replaceChildren(): the native one turns arrays and
+// null into text ("[object HTMLDetailsElement]", "null").
+function put(el, ...children) {
+  el.replaceChildren(...kids(children));
+  return el;
+}
+
 function h(tag, attrs = {}, ...children) {
   const el = document.createElement(tag);
   for (const [k, v] of Object.entries(attrs)) {
@@ -13,9 +26,7 @@ function h(tag, attrs = {}, ...children) {
     else if (k === "class") el.className = v;
     else if (v !== false && v != null) el.setAttribute(k, v === true ? "" : v);
   }
-  for (const c of children.flat()) {
-    if (c != null && c !== false) el.append(c instanceof Node ? c : document.createTextNode(String(c)));
-  }
+  el.append(...kids(children));
   return el;
 }
 
@@ -54,7 +65,7 @@ async function refreshStatus() {
 async function refreshPeople() {
   people = await api("/api/people?hidden=true");
   const list = document.getElementById("people-names");
-  list.replaceChildren(...people.filter((p) => p.name).map((p) => h("option", { value: p.name })));
+  put(list, ...people.filter((p) => p.name).map((p) => h("option", { value: p.name })));
 }
 
 // "Maria" -> existing person by name; "#12" -> person 12; else a new name.
@@ -98,14 +109,14 @@ async function screenPeople() {
   const draw = () => {
     const f = filter.toLowerCase();
     const shown = people.filter((p) => (showHidden || !p.hidden) && label(p).toLowerCase().includes(f));
-    grid.replaceChildren(...shown.map((p) =>
+    put(grid, ...shown.map((p) =>
       h("a", { class: "card", href: `#/pessoa/${p.id}` },
         h("img", { src: crop(p.cover), loading: "lazy", alt: "" }),
         h("div", { class: "name" + (p.name ? "" : " unnamed") }, label(p)),
         h("div", { class: "muted" }, `${p.faces} rostos · ${p.files} fotos${p.hidden ? " · oculta" : ""}`))));
-    if (!shown.length) grid.replaceChildren(h("div", { class: "empty" }, "Nenhuma pessoa."));
+    if (!shown.length) put(grid, h("div", { class: "empty" }, "Nenhuma pessoa."));
   };
-  view.replaceChildren(
+  put(view, 
     h("h1", {}, "Pessoas"),
     h("div", { class: "toolbar" },
       h("input", { type: "search", placeholder: "Filtrar por nome…", oninput: (e) => { filter = e.target.value; draw(); } }),
@@ -176,9 +187,9 @@ async function screenPerson(id) {
     h("button", { onclick: () => { p.faces.forEach((f) => selected.add(f.id)); draw(); } }, "Selecionar todos"));
 
   const gridBox = h("div");
-  const draw = () => { gridBox.replaceChildren(faceGrid(p.faces, selected, onSelection)); onSelection(); };
+  const draw = () => { put(gridBox, faceGrid(p.faces, selected, onSelection)); onSelection(); };
 
-  view.replaceChildren(
+  put(view, 
     h("p", {}, h("a", { href: "#/pessoas" }, "← Pessoas")),
     h("div", { class: "toolbar" },
       nameInput,
@@ -216,7 +227,7 @@ async function screenSuggestions() {
     return el;
   };
   list.append(...items.map(row));
-  view.replaceChildren(h("h1", {}, "É esta pessoa?"),
+  put(view, h("h1", {}, "É esta pessoa?"),
     items.length ? list : h("div", { class: "empty" }, "Nenhuma sugestão pendente. Elas aparecem depois de você dar nome às pessoas e indexar fotos novas."));
 }
 
@@ -233,7 +244,7 @@ async function screenUnassigned() {
     const page = await api(`/api/faces/unassigned?offset=${faces.length}&limit=300`);
     faces = faces.concat(page);
     more.hidden = page.length < 300;
-    gridBox.replaceChildren(faces.length ? faceGrid(faces, selected, onSelection) : h("div", { class: "empty" }, "Nenhum rosto sem grupo."));
+    put(gridBox, faces.length ? faceGrid(faces, selected, onSelection) : h("div", { class: "empty" }, "Nenhum rosto sem grupo."));
   };
   const assign = async () => {
     if (!selected.size || !target.value.trim()) return toast("Selecione rostos e informe a pessoa");
@@ -246,7 +257,7 @@ async function screenUnassigned() {
     toast(`${selected.size} rosto(s) atribuído(s)`);
     route();
   };
-  view.replaceChildren(h("h1", {}, "Rostos sem grupo"),
+  put(view, h("h1", {}, "Rostos sem grupo"),
     h("p", { class: "muted" }, "Rostos que não se parecem o bastante com nenhum grupo. Selecione e atribua a uma pessoa."),
     h("div", { class: "toolbar sticky" }, info, target, h("button", { class: "primary", onclick: assign }, "Atribuir")),
     gridBox, h("div", { class: "toolbar" }, more));
@@ -344,7 +355,7 @@ async function screenSearch() {
   const chips = h("span", { class: "chips" });
   const run = async () => {
     if (!st.text.trim() && !st.people.length && !st.from && !st.to && !st.kinds.length) {
-      out.replaceChildren(h("div", { class: "empty" }, "Digite o que procura ou escolha pessoas, período ou tipo. Para navegar por ano ou pessoa, use a aba Fotos."));
+      put(out, h("div", { class: "empty" }, "Digite o que procura ou escolha pessoas, período ou tipo. Para navegar por ano ou pessoa, use a aba Fotos."));
       return;
     }
     const header = h("div");
@@ -363,11 +374,11 @@ async function screenSearch() {
             h("div", { class: "docs" }, r.mentions.map(docRow))));
         }
       }
-      header.replaceChildren(...parts);
+      put(header, ...parts);
     });
-    out.replaceChildren(header, list);
+    put(out, header, list);
   };
-  const drawChips = () => chips.replaceChildren(...st.people.map((p) =>
+  const drawChips = () => put(chips, ...st.people.map((p) =>
     h("span", { class: "chip" }, p.name, h("button", { title: "Remover", onclick: () => { st.people = st.people.filter((q) => q.id !== p.id); drawChips(); run(); } }, "×"))));
   const personInput = h("input", { type: "text", placeholder: "+ pessoa", list: "people-names", class: "small-input" });
   personInput.addEventListener("change", () => {
@@ -380,7 +391,7 @@ async function screenSearch() {
   textInput.addEventListener("keydown", (e) => { if (e.key === "Enter") { st.text = textInput.value; run(); } });
   const check = (kind, text) => h("label", {}, h("input", { type: "checkbox", checked: st.kinds.includes(kind), onchange: (e) => {
     st.kinds = e.target.checked ? [...st.kinds, kind] : st.kinds.filter((k) => k !== kind); run(); } }), ` ${text}`);
-  view.replaceChildren(
+  put(view, 
     h("div", { class: "toolbar" }, textInput, h("button", { class: "primary", onclick: () => { st.text = textInput.value; run(); } }, "Buscar")),
     h("div", { class: "toolbar" },
       chips, personInput,
@@ -443,7 +454,7 @@ async function screenBrowse() {
       });
       return d;
     });
-    side.replaceChildren(
+    put(side, 
       node("Todas as fotos", tree.total, { title: "Todas as fotos" }, "all"),
       h("h3", {}, "Por ano"), ...yearNodes(tree, [], ""),
       tree.undated ? h("div", { class: "muted small" }, `${tree.undated} sem data`) : null,
@@ -456,10 +467,10 @@ async function screenBrowse() {
   const draw = () => {
     const header = h("div", { class: "toolbar" }, h("h1", {}, st.title));
     const q = searchParams({ ...st, kinds: ["image"], order: "date" });
-    main.replaceChildren(header, pagedResults(q, (r) => header.append(h("span", { class: "muted" }, `${r.total} foto(s)`))));
+    put(main, header, pagedResults(q, (r) => header.append(h("span", { class: "muted" }, `${r.total} foto(s)`))));
   };
 
-  view.replaceChildren(h("div", { class: "browse" }, side, main));
+  put(view, h("div", { class: "browse" }, side, main));
   await drawTree();
   draw();
 }
@@ -495,7 +506,7 @@ function indexPanel(job) {
 async function screenFolders() {
   const [status, folders, job] = await Promise.all([api("/api/status"), api("/api/folders"), api("/api/index")]);
   const panel = h("div");
-  const drawJob = (j) => panel.replaceChildren(indexPanel(j));
+  const drawJob = (j) => put(panel, indexPanel(j));
   const poll = () => {
     clearInterval(indexPoll);
     indexPoll = setInterval(async () => {
@@ -521,7 +532,7 @@ async function screenFolders() {
     ? h("button", { class: "primary", onclick: async () => openPath(await window.pywebview.api.choose_folder()) }, "Escolher pasta…")
     : h("span", {}, pathInput, h("button", { class: "primary", onclick: () => openPath(pathInput.value.trim()) }, "Abrir e indexar"));
 
-  view.replaceChildren(
+  put(view, 
     status.root ? h("div", {},
       h("h1", {}, "Pasta atual"),
       h("p", {}, h("strong", {}, status.root), h("span", { class: "muted" }, ` · ${status.files} fotos e documentos`)),

@@ -150,8 +150,10 @@ progress { width: 100%; height: 12px; }
 .tree h3 { font-size: 13px; text-transform: uppercase; color: var(--muted); margin: 14px 4px 6px; }
 .tree details > summary { list-style: none; cursor: pointer; }
 .tree details > summary::-webkit-details-marker { display: none; }
-.tree details > summary .node::before { content: "▸ "; color: var(--muted); }
-.tree details[open] > summary .node::before { content: "▾ "; }
+.tree details > summary .node > span:first-child::before {
+  content: "▸"; color: var(--muted); display: inline-block; width: 1.1em;
+}
+.tree details[open] > summary .node > span:first-child::before { content: "▾"; }
 .tree details > .node, .tree details > details { margin-left: 16px; }
 .node {
   cursor: pointer;
