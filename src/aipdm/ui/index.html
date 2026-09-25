@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AI-PhotoDocsManager</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header>
+    <strong class="brand">AI-PhotoDocsManager</strong>
+    <nav>
+      <a href="#/pessoas" data-nav="pessoas">Pessoas</a>
+      <a href="#/sugestoes" data-nav="sugestoes">É esta pessoa? <span class="badge" id="n-suggested"></span></a>
+      <a href="#/sem-grupo" data-nav="sem-grupo">Rostos sem grupo <span class="badge" id="n-unassigned"></span></a>
+    </nav>
+    <span class="muted" id="root"></span>
+  </header>
+  <main id="view"></main>
+  <datalist id="people-names"></datalist>
+  <div id="toast" role="status" aria-live="polite"></div>
+  <script src="/app.js"></script>
+</body>
+</html>
