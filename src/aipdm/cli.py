@@ -233,6 +233,20 @@ def cmd_people_merge(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_ui(args: argparse.Namespace) -> int:
+    from aipdm.server.run import serve  # server deps load only for this command
+
+    if args.pasta:
+        path = paths.db_path_for(Path(args.pasta))
+    else:
+        path = Path(args.db) if args.db else paths.latest_db()
+    if path is None or not path.exists():
+        print("Nenhum banco encontrado. Rode primeiro: aipdm index <pasta>", file=sys.stderr)
+        return 1
+    serve(path, browser=args.browser)
+    return 0
+
+
 def cmd_faces_regroup(args: argparse.Namespace) -> int:
     conn = _open_db(args.db)
     removed = reset_groups(conn)
@@ -366,6 +380,12 @@ def build_parser() -> argparse.ArgumentParser:
     p = faces.add_parser("regroup", help="refaz os grupos sem nome com os limiares atuais")
     p.add_argument("--db")
     p.set_defaults(func=cmd_faces_regroup)
+
+    p = sub.add_parser("ui", help="abre a interface")
+    p.add_argument("pasta", nargs="?", help="pasta já indexada (padrão: a mais recente)")
+    p.add_argument("--db")
+    p.add_argument("--browser", action="store_true", help="abre no navegador em vez da janela")
+    p.set_defaults(func=cmd_ui)
 
     p = sub.add_parser("doctor", help="verifica modelos, versões e licenças")
     p.set_defaults(func=cmd_doctor)

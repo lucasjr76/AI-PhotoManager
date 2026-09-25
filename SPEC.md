@@ -23,13 +23,13 @@ O usuário baixa o app, aponta uma pasta (ex.: backup descriptografado do WhatsA
 | RNF-5 | Indexação **incremental e retomável**: interrompida, continua de onde parou; reabertura processa só o que mudou. |
 | RNF-6 | Todas as licenças de modelos e bibliotecas devem permitir **redistribuição comercial**. Proibido: modelos InsightFace (buffalo_*), qualquer peso "non-commercial/research only". |
 | RNF-7 | Interface em **português (pt-BR)**. |
-| RNF-8 | Servidor HTTP interno escuta só em `127.0.0.1`, porta aleatória, com token de sessão exigido em toda requisição. |
+| RNF-8 | Servidor HTTP interno escuta só em `127.0.0.1`, porta aleatória, com token de sessão exigido em toda requisição (cookie `HttpOnly; SameSite=Strict` definido por `/?t=<token>`, ou cabeçalho `X-Token`). O cabeçalho `Host` precisa ser `127.0.0.1:<porta>` (defesa contra DNS rebinding). |
 | RNF-9 | Arquivos só são servidos à UI por **ID do banco**, nunca por caminho vindo do cliente (sem path traversal). |
 
 ## 3. Stack
 
 - **Python 3.12**, gerenciado com **uv** (`pyproject.toml`, `uv.lock`).
-- **UI:** FastAPI (backend local) + HTML/CSS/JS puro (sem build step de frontend) exibido em janela nativa via **pywebview**.
+- **UI:** FastAPI (backend local) + HTML/CSS/JS puro (sem build step de frontend) exibido em janela nativa via **pywebview**, que usa o motor web do sistema: WebKitGTK no Linux (backend GTK: `pywebview[gtk]` → PyGObject/pycairo, LGPL, compilados na instalação; exige `webkit2gtk-4.1` do sistema) e Edge WebView2 no Windows. Sem Qt (traria um Chromium de ~240 MB).
 - **Banco:** SQLite (WAL) + **FTS5** para texto. Embeddings como BLOB `float32`; similaridade por força bruta com numpy (volumes até ~50k itens).
 - **Imagens:** Pillow + `pillow-heif` (HEIC). Thumbnails em cache próprio.
   Atenção: os wheels do `pillow-heif` são **GPLv2** (incluem libx265); aceito pelo responsável do projeto em 2026-09-24 (alternativa LGPL `pi-heif` foi descontinuada).
@@ -195,6 +195,8 @@ aipdm people list | people name <id> "Nome" | people merge <id> <id>
 aipdm faces export <person_id> <dir_saida>      # recortes para inspeção visual
 aipdm search [--person "Nome"]... [--from AAAA-MM-DD] [--to AAAA-MM-DD] [--text "bolo"] [--limit 20]
 aipdm doctor                                      # verifica modelos, versões, licenças
+aipdm ui [pasta] [--browser]                      # interface (fase 3); --browser abre no navegador padrão
+aipdm faces regroup                               # refaz grupos sem nome com os limiares atuais
 ```
 
 **Re-scan:** rodar `aipdm index` de novo na mesma pasta re-varre e processa só o que mudou (novos, alterados, ausentes). `--force` reprocessa todos os arquivos. Na UI (fase 3), botão "Re-escanear pasta" com o mesmo comportamento.
