@@ -31,11 +31,11 @@ Embedding = NDArray[np.float32]
 class FaceSettings:
     min_score: float = 0.8
     min_size: int = 40  # pixels, in original image coordinates
-    # Provisional, from the real test folder: eps 0.5 chained 80% of faces into one
-    # group; 0.3 keeps the 4 most frequent people apart. Calibrate with
-    # tools/calibrate_faces.py once people are named (OpenCV's 0.363 is far too loose here).
+    # Calibrated on the real test folder (30 named people, 3,527 faces; see SPEC):
+    # no two different people scored >= 0.687; at 0.60, 7.7% of faces have an impostor
+    # above the bar, acceptable for a question. eps > 0.3 merged different people.
     t_auto: float = 0.7  # = 1 - cluster_eps, same bar as joining a cluster
-    t_suggest: float = 0.5
+    t_suggest: float = 0.6
     cluster_eps: float = 0.3  # cosine distance, i.e. similarity >= 0.7
     cluster_min_samples: int = 3
     cluster_block: int = DEFAULT_BLOCK

@@ -37,24 +37,38 @@ def main() -> None:
     x = from_blobs([r[1] for r in rows])
     print(f"Gabarito: {len(x)} rostos de {people} pessoas nomeadas\n")
 
-    # Leave-one-out: best similarity to each *other* labeled face, per person.
+    # Impostor scores: best similarity of each face to any face of ANOTHER person.
+    # (A leave-one-out "same person" score would be circular: the named groups came from
+    # DBSCAN, so every face already has a close neighbour inside its own group.)
     sims = x @ x.T
-    np.fill_diagonal(sims, -1.0)
-    person_ids = np.unique(labels)
-    best_per_person = np.stack([sims[:, labels == p].max(axis=1) for p in person_ids], axis=1)
-    predicted = person_ids[best_per_person.argmax(axis=1)]
-    best_score = best_per_person.max(axis=1)
-    correct = predicted == labels
+    impostor = np.where(labels[:, None] == labels[None, :], -1.0, sims).max(axis=1)
+    print("Risco de confundir pessoas (T_auto acima de todos; T_suggest tolera alguns):")
+    print(f"{'limiar':>7} {'rostos com outra pessoa acima':>31}")
+    for t in np.arange(0.50, 0.76, 0.025):
+        print(f"{t:7.3f} {100 * (impostor >= t).mean():30.2f}%")
+    print(f"maior semelhança entre pessoas diferentes: {impostor.max():.3f}\n")
 
-    print("Atribuição (rosto novo x pessoas conhecidas):")
-    print(f"{'limiar':>7} {'precisão':>9} {'cobertura':>10}")
-    for t in np.arange(0.30, 0.81, 0.025):
-        taken = best_score >= t
-        if not taken.any():
-            continue
-        print(f"{t:7.3f} {correct[taken].mean():9.3f} {taken.mean():10.3f}")
-    print("\nSugestão: T_auto = menor limiar com precisão >= 0,99;")
-    print("          T_suggest = menor limiar com precisão >= 0,90.\n")
+    orphans = from_blobs(
+        [
+            r[0]
+            for r in conn.execute(
+                "SELECT fa.embedding FROM faces fa JOIN files f ON f.id = fa.file_id"
+                " WHERE fa.person_id IS NULL AND f.is_sticker = 0"
+            )
+        ]
+    )
+    if len(orphans):
+        person_ids = np.unique(labels)
+        best = orphans @ x.T
+        per_person = np.stack([best[:, labels == p].max(axis=1) for p in person_ids], axis=1)
+        top = -np.sort(-per_person, axis=1)
+        second = top[:, 1] if top.shape[1] > 1 else np.full(len(top), -1.0)
+        print(f"Rostos sem grupo ({len(orphans)}) que seriam sugeridos/atribuídos:")
+        print(f"{'limiar':>7} {'rostos':>7} {'ambíguos':>9}")
+        for t in np.arange(0.50, 0.76, 0.05):
+            hits, ambiguous = (top[:, 0] >= t), (top[:, 0] >= t) & (second >= t)
+            print(f"{t:7.2f} {hits.sum():7d} {ambiguous.sum():9d}")
+        print()
 
     print("Agrupamento DBSCAN (min_samples=3) sobre o gabarito:")
     print(f"{'eps':>6} {'ARI':>6} {'grupos':>7} {'ruído':>6}")
