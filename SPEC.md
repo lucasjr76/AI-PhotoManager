@@ -33,9 +33,9 @@ O usuário baixa o app, aponta uma pasta (ex.: backup descriptografado do WhatsA
 - **Banco:** SQLite (WAL) + **FTS5** para texto. Embeddings como BLOB `float32`; similaridade por força bruta com numpy (volumes até ~50k itens).
 - **Imagens:** Pillow + `pillow-heif` (HEIC). Thumbnails em cache próprio.
   Atenção: os wheels do `pillow-heif` são **GPLv2** (incluem libx265); aceito pelo responsável do projeto em 2026-09-24 (alternativa LGPL `pi-heif` foi descontinuada).
-- **Rostos:** OpenCV Zoo — detector **YuNet** (`face_detection_yunet_2023mar.onnx`, MIT) via `cv2.FaceDetectorYN`; reconhecimento **SFace** (`face_recognition_sface_2021dec.onnx`, Apache-2.0) via `cv2.FaceRecognizerSF` (alignCrop + feature, 128-d).
-- **Objeto/cena:** CLIP multilíngue exportado para ONNX. Candidato inicial: image encoder `clip-ViT-B-32` + text encoder `sentence-transformers/clip-ViT-B-32-multilingual-v1`. Validar licença e qualidade de consultas em português antes de fixar.
-- **OCR:** **RapidOCR** (ONNX, Apache-2.0) com modelo de reconhecimento **latino** (precisa acertar acentos do português). Validar qual pacote/versão (`rapidocr` vs `rapidocr_onnxruntime`) e como selecionar o modelo latino.
+- **Rostos:** OpenCV Zoo — detector **YuNet** (`face_detection_yunet_2026may.onnx`, MIT, entrada dinâmica; exige OpenCV 5 — `opencv-python-headless>=5`) via `cv2.FaceDetectorYN`; reconhecimento **SFace** (`face_recognition_sface_2021dec.onnx`, Apache-2.0) via `cv2.FaceRecognizerSF` (alignCrop + feature, 128-d).
+- **Objeto/cena:** CLIP multilíngue LAION `xlm-roberta-base-ViT-B-32` / `laion5b_s13b_b90k` (MIT), exportado por `tools/export_clip.py` (open_clip, só dev) para `clip_image.onnx` (fp32) e `clip_text.onnx` (int8 dinâmico; cosseno ≥ 0,99 contra o torch). Tokenizador `xlm-roberta-base` via `tokenizers` (`Tokenizer.from_file`, sem rede), contexto 77, pad id 1. Descartado o par OpenAI + multilingual-v1 (model card da OpenAI restringe uso em produto).
+- **OCR:** pacote `rapidocr` 3.x (Apache-2.0) com detector `ch_PP-OCRv5_det_mobile.onnx` e reconhecedor `latin_PP-OCRv5_rec_mobile.onnx` (dicionário embutido no ONNX), sem classificador de orientação. Modelos sempre passados por caminho local (`Det.model_path`/`Rec.model_path`) — sem isso o rapidocr baixa modelos na 1ª execução (viola RNF-2). O `opencv-python` exigido pelo rapidocr é substituído pelo headless via `[tool.uv] override-dependencies`.
 - **PDF:** `pypdfium2` (BSD-3/Apache-2.0) — extrai camada de texto; páginas sem texto são renderizadas (200 dpi) e passam pelo OCR. PyMuPDF descartado (AGPL-3.0).
 - **DOCX:** python-docx (parágrafos + tabelas).
 - **Empacotamento:** PyInstaller → AppImage (Linux) e instalador Inno Setup (Windows). Build via GitHub Actions (matriz ubuntu/windows).
@@ -61,6 +61,7 @@ ai-photodocsmanager/
 │   │   ├── images.py       # abertura de imagens, EXIF, thumbnails
 │   │   ├── search.py       # busca combinada e ranqueamento
 │   │   ├── db.py           # schema, migrações, acesso
+│   │   ├── cluster.py      # DBSCAN cosseno em blocos (numpy puro)
 │   │   └── paths.py        # diretório de dados por SO
 │   ├── cli.py              # interface de linha de comando (fases 1-2)
 │   ├── server/             # FastAPI (fase 3)
@@ -150,22 +151,24 @@ CREATE VIRTUAL TABLE texts USING fts5(
 
 1. **Scan:** percorre a raiz (segue symlinks: não; **pastas ocultas** — nome iniciado por `.`, ex. `.Links`, `.Statuses` — são ignoradas e, se já estiverem no banco, removidas dele), compara `size+mtime` com o banco; novos/alterados → `pending`; ausentes → `missing` (não apaga, permite reaparecer).
 2. **Estágios por arquivo**, cada um registrado em `stages_done` para retomada: `date → thumb → faces → clip → ocr/text`.
-3. Execução em pool de processos (`os.cpu_count() - 1`), lotes para CLIP. Escrita no SQLite apenas pelo processo principal.
+3. Execução em pool de processos (`os.cpu_count() - 1`), lotes para CLIP. Escrita no SQLite apenas pelo processo principal. Cada worker carrega os modelos uma vez (~0,5 GB de RAM por worker) e usa 1 thread por sessão de inferência.
+   Estágios por tipo: imagem `date,thumb,faces,clip,ocr`; PDF `date,thumb,text,ocr`; DOCX `date,text`. Figurinhas pulam `faces` e `ocr`. `--only faces,clip,ocr` restringe os estágios pesados; bancos antigos recebem só os estágios que faltam.
 4. Erros por arquivo não param a indexação (`status='error'`, mensagem gravada).
 5. Progresso emitido como eventos (CLI: barra; UI: SSE ou polling).
 6. Ctrl+C / fechar janela: termina o lote corrente e sai limpo.
 
-Imagens são reduzidas para no máx. 1600 px no lado maior antes de rostos/OCR (bbox reescalado ao original). OCR só roda se um detector leve indicar presença de texto, ou sempre em imagens com proporção de print (a definir na calibração — medir custo).
+Imagens são reduzidas para no máx. 1600 px no lado maior antes de rostos/OCR (bbox reescalado ao original). O detector de texto do RapidOCR faz o papel de detector leve: o reconhecimento só roda nas caixas detectadas (medido: ~390 ms/imagem com OCR em média na pasta real, é o estágio mais caro). PDFs: páginas sem camada de texto são renderizadas a 200 dpi e passam pelo OCR.
 
 ## 9. Rostos: agrupamento e atribuição
 
 - Descartar detecções com `det_score < 0.8` ou rosto menor que 40 px (ambos configuráveis).
-- **Primeira indexação:** DBSCAN (métrica cosseno) sobre todos os embeddings sem pessoa → cada cluster vira um `people` sem nome. Ruído fica sem pessoa ("rostos não agrupados").
+- **Primeira indexação:** DBSCAN (métrica cosseno, implementação própria em numpy calculando vizinhança em blocos de 2048 — nunca materializa N×N; paridade verificada contra `sklearn.cluster.DBSCAN` em teste) sobre todos os embeddings sem pessoa → cada cluster vira um `people` sem nome. Ruído fica sem pessoa ("rostos não agrupados").
 - **Rostos novos depois que existem pessoas nomeadas:** comparar com os embeddings das faces confirmadas de cada pessoa (máx. ou média dos top-k):
   - `score ≥ T_auto` → atribui (`assign_source='auto'`)
   - `T_suggest ≤ score < T_auto` → `suggested`, entra na fila "É a Maria?"
   - abaixo → re-clustering apenas dos órfãos.
-- Ponto de partida: limiar de cosseno do SFace recomendado pelo OpenCV (0.363). `T_auto` e `T_suggest` **devem ser calibrados** com `tools/calibrate_faces.py` na pasta de teste real (relatar precisão/recall).
+- A comparação com `T_auto` usa todas as pessoas (com ou sem nome), para rostos novos não fragmentarem grupos existentes; `suggested` só para pessoas com nome. Rostos `suggested` não contam como a pessoa na busca.
+- Ponto de partida: limiar de cosseno do SFace recomendado pelo OpenCV (0.363) para `T_suggest`; `T_auto` = 0.5; `eps` do DBSCAN = 0.5 (similaridade ≥ 0.5), `min_samples` = 3. `T_auto` e `T_suggest` **devem ser calibrados** com `tools/calibrate_faces.py` na pasta de teste real (relatar precisão/recall).
 - Ações do usuário: nomear, renomear, mesclar pessoas, remover rosto de uma pessoa, marcar "não é esta pessoa" (gravar negativa para não sugerir de novo), ocultar pessoa.
 - Ações do usuário (`assign_source='user'`) nunca são sobrescritas por processamento automático.
 
@@ -177,7 +180,7 @@ Entrada: `people_ids[]` (AND — todas na mesma foto), `date_from`, `date_to`, `
 2. Se `text` presente, dois sinais:
    - **CLIP:** similaridade entre embedding do texto e das imagens candidatas.
    - **FTS5:** `bm25` sobre OCR/texto de documentos.
-3. Normalizar os dois scores para 0..1 e combinar (peso inicial 0.5/0.5, ajustável). CLIP abaixo de um limiar mínimo não entra.
+3. Normalizar os dois scores para 0..1 e combinar (peso inicial 0.5/0.5, ajustável). CLIP abaixo de um limiar mínimo não entra (inicial: similaridade 0.2; calibrar).
 4. Se o texto corresponder exatamente ao nome de uma pessoa cadastrada, tratar também como filtro de pessoa **e** buscar o nome no FTS (retorna fotos dela + documentos que a citam), apresentando em seções separadas.
 5. Ordenação padrão: relevância; alternativa: data.
 
