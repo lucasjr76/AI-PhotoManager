@@ -75,7 +75,10 @@ def is_sticker(name: str) -> bool:
 
 
 def walk(root: Path) -> Iterator[tuple[str, int, float]]:
-    """Yield (posix rel_path, size, mtime) of regular files, without following symlinks."""
+    """Yield (posix rel_path, size, mtime) of regular files.
+
+    Symlinks are not followed and hidden folders (".Links", ".Statuses"...) are skipped.
+    """
     stack = [root]
     while stack:
         current = stack.pop()
@@ -88,7 +91,8 @@ def walk(root: Path) -> Iterator[tuple[str, int, float]]:
             if entry.is_symlink():
                 continue
             if entry.is_dir():
-                stack.append(Path(entry.path))
+                if not entry.name.startswith("."):
+                    stack.append(Path(entry.path))
             elif entry.is_file():
                 st = entry.stat()
                 rel = Path(entry.path).relative_to(root).as_posix()
@@ -102,6 +106,11 @@ class ScanStats:
     missing: int = 0
     reappeared: int = 0
     unchanged: int = 0
+    ignored: int = 0
+
+
+def in_hidden_folder(rel_path: str) -> bool:
+    return any(part.startswith(".") for part in rel_path.split("/")[:-1])
 
 
 def scan(conn: sqlite3.Connection, root: Path, *, force: bool = False) -> ScanStats:
@@ -147,8 +156,16 @@ def scan(conn: sqlite3.Connection, root: Path, *, force: bool = False) -> ScanSt
             conn.execute("UPDATE files SET status = ? WHERE id = ?", (restored, row["id"]))
         else:
             stats.unchanged += 1
+    # Rows indexed before hidden folders were skipped: drop them, they are not "missing".
+    # ponytail: their thumbnails stay on disk; add a thumbs cleanup if the cache size matters.
+    ignored = [(row["id"],) for rel, row in known.items() if in_hidden_folder(rel)]
+    stats.ignored = len(ignored)
+    conn.executemany("DELETE FROM texts WHERE file_id = ?", ignored)
+    conn.executemany("DELETE FROM files WHERE id = ?", ignored)
     gone = [
-        (row["id"],) for rel, row in known.items() if rel not in seen and row["status"] != "missing"
+        (row["id"],)
+        for rel, row in known.items()
+        if rel not in seen and row["status"] != "missing" and not in_hidden_folder(rel)
     ]
     stats.missing = len(gone)
     conn.executemany("UPDATE files SET status = 'missing' WHERE id = ?", gone)

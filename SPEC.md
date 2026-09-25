@@ -148,7 +148,7 @@ CREATE VIRTUAL TABLE texts USING fts5(
 
 ## 8. Pipeline de indexação
 
-1. **Scan:** percorre a raiz (segue symlinks: não), compara `size+mtime` com o banco; novos/alterados → `pending`; ausentes → `missing` (não apaga, permite reaparecer).
+1. **Scan:** percorre a raiz (segue symlinks: não; **pastas ocultas** — nome iniciado por `.`, ex. `.Links`, `.Statuses` — são ignoradas e, se já estiverem no banco, removidas dele), compara `size+mtime` com o banco; novos/alterados → `pending`; ausentes → `missing` (não apaga, permite reaparecer).
 2. **Estágios por arquivo**, cada um registrado em `stages_done` para retomada: `date → thumb → faces → clip → ocr/text`.
 3. Execução em pool de processos (`os.cpu_count() - 1`), lotes para CLIP. Escrita no SQLite apenas pelo processo principal.
 4. Erros por arquivo não param a indexação (`status='error'`, mensagem gravada).

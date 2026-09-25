@@ -9,7 +9,7 @@ from PIL import Image
 
 from aipdm.cli import main
 from aipdm.core import db
-from aipdm.core.scanner import index
+from aipdm.core.scanner import in_hidden_folder, index
 from aipdm.core.search import search_text
 
 
@@ -179,3 +179,39 @@ def test_existing_rows_are_reclassified(extensionless_dir: Path, db_path: Path) 
     assert (stats.scan.changed, stats.processed) == (5, 5)
     assert rows(db_path)["DOC-20220823-WA0056"]["kind"] == "pdf"
     assert index(extensionless_dir, db_path, workers=1).processed == 0
+
+
+def test_hidden_folders_are_skipped(sample_dir: Path, db_path: Path) -> None:
+    links = sample_dir / ".Links"
+    links.mkdir()
+    Image.new("RGB", (10, 10)).save(links / "004d66509d39a28a", "JPEG")
+    nested = sample_dir / "WhatsApp Documents" / ".oculta"
+    nested.mkdir()
+    make_pdf(nested / "segredo.pdf", ["João"])
+    (sample_dir / ".nomedia").write_bytes(b"")  # hidden *file*: still listed
+
+    stats = index(sample_dir, db_path, workers=1)
+    assert stats.scan.new == 9
+    files = rows(db_path)
+    assert ".nomedia" in files
+    assert not any(in_hidden_folder(rel) for rel in files)
+
+
+def test_rows_from_hidden_folders_are_purged(sample_dir: Path, db_path: Path) -> None:
+    """A database built before hidden folders were skipped loses those rows, not 'missing'."""
+    index(sample_dir, db_path, workers=1)
+    conn = db.connect(db_path)
+    cur = conn.execute(
+        "INSERT INTO files (rel_path, kind, size, mtime, status) VALUES (?, 'image', 1, 1, 'done')",
+        (".Links/004d66509d39a28a",),
+    )
+    conn.execute("INSERT INTO texts (content, file_id, page) VALUES ('x', ?, 1)", (cur.lastrowid,))
+    conn.commit()
+    conn.close()
+
+    stats = index(sample_dir, db_path, workers=1)
+    assert (stats.scan.ignored, stats.scan.missing, stats.processed) == (1, 0, 0)
+    assert ".Links/004d66509d39a28a" not in rows(db_path)
+    conn = db.connect(db_path)
+    assert conn.execute("SELECT COUNT(*) FROM texts WHERE content = 'x'").fetchone()[0] == 0
+    conn.close()

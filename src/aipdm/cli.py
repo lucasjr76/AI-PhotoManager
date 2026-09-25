@@ -41,6 +41,8 @@ def cmd_index(args: argparse.Namespace) -> int:
         f"Varredura: {s.new} novos, {s.changed} alterados, {s.missing} ausentes, "
         f"{s.reappeared} reapareceram, {s.unchanged} sem mudança"
     )
+    if s.ignored:
+        print(f"Removidos do banco (pastas ocultas): {s.ignored}")
     print(f"Processados: {stats.processed} de {stats.pending} (erros: {stats.errors})")
     print(f"Tempo total: {stats.seconds:.1f} s")
     if stats.interrupted:
