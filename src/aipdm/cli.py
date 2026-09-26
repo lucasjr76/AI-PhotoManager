@@ -10,7 +10,7 @@ from pathlib import Path
 
 from aipdm.core import db, paths, scanner
 from aipdm.core.clip import ClipTextModel
-from aipdm.core.faces import FaceSettings, group_faces, reset_groups
+from aipdm.core.faces import group_faces, load_settings, reset_groups
 from aipdm.core.images import load_image
 from aipdm.core.search import Hit, Query, find_person, search
 
@@ -254,7 +254,7 @@ def cmd_ui(args: argparse.Namespace) -> int:
 def cmd_faces_regroup(args: argparse.Namespace) -> int:
     conn = _open_db(args.db)
     removed = reset_groups(conn)
-    g = group_faces(conn, FaceSettings())
+    g = group_faces(conn, load_settings(conn))
     print(f"{removed} grupos sem nome desfeitos.")
     print(
         f"Rostos: {g.auto} atribuídos automaticamente, {g.suggested} sugeridos, "

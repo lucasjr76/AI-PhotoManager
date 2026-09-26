@@ -203,3 +203,10 @@ body.viewer-open { overflow: hidden; }
 .exif th { text-align: left; color: var(--muted); font-weight: 400; padding: 3px 10px 3px 0; vertical-align: top; white-space: nowrap; }
 .exif td { padding: 3px 0; word-break: break-word; }
 .path { word-break: break-all; }
+
+.face .tag.ai, .ai-badge { background: #6d28d9; color: #fff; }
+.ai-badge { font-size: 11px; border-radius: 6px; padding: 0 5px; margin-left: 6px; }
+.chip.ai { outline: 1px dashed #8b5cf6; }
+.setting { max-width: 760px; margin-bottom: 8px; }
+.setting p { margin: 4px 0 0; }
+.num-input { width: 90px; font: inherit; padding: 5px 8px; border-radius: 8px; border: 1px solid var(--line); background: var(--panel); color: var(--text); }

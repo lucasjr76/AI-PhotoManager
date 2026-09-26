@@ -78,6 +78,14 @@ class IndexJob:
     stop: threading.Event = field(default_factory=threading.Event, repr=False)
 
 
+class Settings(BaseModel):
+    t_auto: float
+    t_suggest: float
+    cluster_eps: float
+    apply: bool = False  # regroup now (keeps names and user decisions)
+    reset: bool = False  # back to the defaults
+
+
 class MonitorSwitch(BaseModel):
     enabled: bool
 
@@ -420,9 +428,10 @@ def create_app(
         if row is None:
             raise HTTPException(404)
         people_rows = c.execute(
-            "SELECT DISTINCT p.id, p.name FROM faces fa JOIN people p ON p.id = fa.person_id"
+            "SELECT p.id, p.name, MIN(fa.assign_source = 'auto'), MAX(fa.assign_score)"
+            " FROM faces fa JOIN people p ON p.id = fa.person_id"
             " WHERE fa.file_id = ? AND fa.assign_source != 'suggested' AND p.name IS NOT NULL"
-            " ORDER BY p.name",
+            " GROUP BY p.id ORDER BY p.name",
             (file_id,),
         ).fetchall()
         data: dict[str, object] = {
@@ -434,7 +443,10 @@ def create_app(
             "width": row["width"],
             "height": row["height"],
             "size": row["size"],
-            "people": [{"id": r[0], "name": r[1]} for r in people_rows],
+            # ai: identified by the app against already-named people, not confirmed by the user
+            "people": [
+                {"id": r[0], "name": r[1], "ai": bool(r[2]), "score": r[3]} for r in people_rows
+            ],
             "date_source": row["date_source"],
             "lat": row["lat"],
             "lon": row["lon"],
@@ -662,6 +674,41 @@ def create_app(
         if job.running:
             data["seconds"] = time.time() - job.started
         return data
+
+    # --- settings -------------------------------------------------------------
+
+    def settings_view(current: faces.FaceSettings) -> dict[str, object]:
+        default = faces.FaceSettings()
+        keys = ("t_auto", "t_suggest", "cluster_eps")
+        return {
+            **{k: getattr(current, k) for k in keys},
+            "defaults": {k: getattr(default, k) for k in keys},
+            "ranges": faces.SETTINGS_RANGES,
+        }
+
+    @app.get("/api/settings")
+    def get_settings(c: sqlite3.Connection = Conn) -> dict[str, object]:
+        return settings_view(faces.load_settings(c))
+
+    @app.post("/api/settings")
+    def set_settings(body: Settings, c: sqlite3.Connection = Conn) -> dict[str, object]:
+        if body.reset:
+            current = faces.reset_settings(c)
+        else:
+            try:
+                current = faces.save_settings(
+                    c, t_auto=body.t_auto, t_suggest=body.t_suggest, cluster_eps=body.cluster_eps
+                )
+            except ValueError as exc:
+                raise HTTPException(400, str(exc)) from exc
+        result = settings_view(current)
+        if body.apply:
+            with state.lock:
+                if state.job and state.job.running:
+                    raise HTTPException(409, "aguarde a indexação terminar para reagrupar")
+                faces.reset_groups(c)
+                result["grouping"] = asdict(faces.group_faces(c, current))
+        return result
 
     # --- folder monitoring ----------------------------------------------------
 

@@ -185,7 +185,9 @@ function openViewer(items, index) {
       info ? [
         h("h2", {}, info.rel_path.split("/").pop()),
         info.people.length ? h("div", { class: "chips" }, info.people.map((p) =>
-          h("a", { class: "chip", href: `#/pessoa/${p.id}`, onclick: close }, p.name))) : null,
+          h("a", { class: "chip" + (p.ai ? " ai" : ""), href: `#/pessoa/${p.id}`, onclick: close,
+            title: p.ai ? "Identificado automaticamente pela IA; confirme na tela da pessoa" : "" },
+            p.name, p.ai ? h("span", { class: "ai-badge" }, `IA ${Math.round((p.score || 0) * 100)}%`) : null))) : null,
         info.kind === "pdf" && pages > 1 ? h("div", { class: "toolbar" },
           h("button", { onclick: () => turn(-1), disabled: page === 1, title: "↑" }, "‹ Página"),
           h("span", {}, `${page} de ${pages}`),
@@ -265,7 +267,9 @@ function faceGrid(faces, selected, onChange) {
       },
       ondblclick: () => openViewer(faces.map((x) => ({ file_id: x.file })), faces.indexOf(f)),
     }, h("img", { src: crop(f.id), loading: "lazy", alt: "" }),
-      f.source === "suggested" ? h("span", { class: "tag" }, "sugerido") : null);
+      f.source === "suggested" ? h("span", { class: "tag" }, "sugerido")
+        : f.source === "auto" ? h("span", { class: "tag ai", title: "Identificado automaticamente pela IA, ainda não confirmado por você" },
+          `IA ${Math.round((f.score || 0) * 100)}%`) : null);
     return el;
   }));
 }
@@ -331,6 +335,13 @@ async function screenPerson(id) {
     selInfo.textContent = selected.size ? `${selected.size} selecionado(s)` : "Clique nos rostos que não são desta pessoa";
     for (const b of selBar.querySelectorAll("button.needs-sel")) b.disabled = !selected.size;
   };
+  const confirmSelected = async () => {
+    for (const face of selected) await api(`/api/faces/${face}/assign`, { person_id: p.id });
+    toast(`${selected.size} rosto(s) confirmado(s)`);
+    route();
+  };
+  const aiCount = p.faces.filter((f) => f.source === "auto").length;
+  let onlyAi = false;
   const removeSelected = async () => {
     for (const face of selected) await api(`/api/faces/${face}/remove`, {});
     toast(`${selected.size} rosto(s) removido(s) desta pessoa`);
@@ -352,13 +363,18 @@ async function screenPerson(id) {
   };
 
   selBar.append(selInfo,
+    aiCount ? h("label", { title: "Rostos que a IA atribuiu sozinha; revise principalmente crianças" },
+      h("input", { type: "checkbox", onchange: (e) => { onlyAi = e.target.checked; selected.clear(); draw(); } }),
+      ` só IA (${aiCount})`) : null,
+    h("button", { class: "ok needs-sel", onclick: confirmSelected, title: "Marca como confirmado por você; o selo IA some" }, "Confirmar"),
     h("button", { class: "danger needs-sel", onclick: removeSelected }, "Não é esta pessoa"),
     moveInput, h("button", { class: "needs-sel", onclick: moveSelected }, "Mover para"),
     h("button", { class: "needs-sel", onclick: () => { selected.clear(); route(); } }, "Limpar seleção"),
-    h("button", { onclick: () => { p.faces.forEach((f) => selected.add(f.id)); draw(); } }, "Selecionar todos"));
+    h("button", { onclick: () => { shown().forEach((f) => selected.add(f.id)); draw(); } }, "Selecionar todos"));
 
   const gridBox = h("div");
-  const draw = () => { put(gridBox, faceGrid(p.faces, selected, onSelection)); onSelection(); };
+  const shown = () => (onlyAi ? p.faces.filter((f) => f.source === "auto") : p.faces);
+  const draw = () => { put(gridBox, faceGrid(shown(), selected, onSelection)); onSelection(); };
 
   put(view, 
     h("p", {}, h("a", { href: "#/pessoas" }, "← Pessoas")),
@@ -667,6 +683,48 @@ async function screenBrowse() {
   draw();
 }
 
+async function screenConfig() {
+  const cfg = await api("/api/settings");
+  const result = h("div");
+  const field = (key, label, help) => {
+    const [min, max] = cfg.ranges[key];
+    const input = h("input", { type: "number", step: "0.01", min, max, value: cfg[key], class: "num-input" });
+    return { key, input, el: h("div", { class: "setting" },
+      h("label", {}, h("strong", {}, label), " ", input,
+        h("span", { class: "muted small" }, ` padrão ${cfg.defaults[key]} · entre ${min} e ${max}`)),
+      h("p", { class: "muted" }, help)) };
+  };
+  const fields = [
+    field("t_auto", "Atribuir automaticamente a partir de",
+      "Semelhança mínima para a IA colocar um rosto novo numa pessoa sem perguntar (selo IA). Mais alto = menos erros, mais perguntas. Com adultos, 0,60–0,70 costuma acertar; crianças que cresceram e recém-nascidos erram mais."),
+    field("t_suggest", "Perguntar \"É esta pessoa?\" a partir de",
+      "Abaixo do limiar automático e acima deste, o rosto vai para a fila de perguntas. Mais baixo = mais perguntas."),
+    field("cluster_eps", "Distância para agrupar rostos sem nome (eps)",
+      "Controla como rostos ainda sem pessoa são juntados em grupos novos (1 − semelhança). Mais alto = grupos maiores, com risco de misturar pessoas diferentes; na sua pasta, 0,35 já misturava."),
+  ];
+  const values = () => Object.fromEntries(fields.map((f) => [f.key, Number(f.input.value)]));
+  const send = async (extra) => {
+    const r = await api("/api/settings", { ...values(), ...extra });
+    fields.forEach((f) => { f.input.value = r[f.key]; });
+    if (r.grouping) {
+      const g = r.grouping;
+      put(result, h("div", { class: "panel" }, `Reagrupado: ${g.auto} atribuídos automaticamente, ${g.suggested} sugeridos, ${g.clustered} rostos em ${g.new_people} grupos novos, ${g.unassigned} sem grupo.`));
+      refreshStatus();
+    }
+    toast("Configurações salvas");
+  };
+  put(view,
+    h("h1", {}, "Configurações"),
+    h("p", { class: "muted" }, "Valem para a pasta atual. Nomes, confirmações e correções feitas por você nunca são alterados."),
+    h("h2", {}, "Reconhecimento de rostos"),
+    fields.map((f) => f.el),
+    h("div", { class: "toolbar" },
+      h("button", { onclick: () => send({}) }, "Salvar (vale para as próximas indexações)"),
+      h("button", { class: "primary", onclick: () => confirm("Refazer os grupos sem nome e as atribuições automáticas com estes valores?") && send({ apply: true }) }, "Salvar e reagrupar agora"),
+      h("button", { onclick: () => send({ reset: true }) }, "Restaurar padrões")),
+    result);
+}
+
 let indexPoll = null;
 
 function stageTable(seconds) {
@@ -782,6 +840,7 @@ async function route() {
   refreshStatus();
   if (!status.root && page !== "pastas") { location.hash = "#/pastas"; return; }
   if (page === "busca") return screenSearch();
+  if (page === "config") return screenConfig();
   if (page === "fotos") return screenBrowse();
   if (page === "pastas") return screenFolders();
   if (page === "pessoa" && arg) return screenPerson(Number(arg));

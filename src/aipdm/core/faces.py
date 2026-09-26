@@ -10,7 +10,7 @@ User decisions ('user' assignments, negatives) are never overwritten.
 """
 
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import cv2
@@ -39,6 +39,52 @@ class FaceSettings:
     cluster_eps: float = 0.3  # cosine distance, i.e. similarity >= 0.7
     cluster_min_samples: int = 3
     cluster_block: int = DEFAULT_BLOCK
+
+
+# User-tunable settings (Configurações screen), stored per folder in the meta table.
+SETTINGS_META = {
+    "t_auto": "faces_t_auto",
+    "t_suggest": "faces_t_suggest",
+    "cluster_eps": "faces_eps",
+}
+SETTINGS_RANGES = {"t_auto": (0.3, 0.99), "t_suggest": (0.2, 0.99), "cluster_eps": (0.05, 0.7)}
+
+
+def load_settings(conn: sqlite3.Connection) -> FaceSettings:
+    """Defaults, overridden by what the user saved for this folder."""
+    settings = FaceSettings()
+    for field, key in SETTINGS_META.items():
+        row = conn.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
+        if row is not None:
+            settings = replace(settings, **{field: float(row[0])})  # type: ignore[arg-type]
+    return settings
+
+
+def save_settings(
+    conn: sqlite3.Connection, *, t_auto: float, t_suggest: float, cluster_eps: float
+) -> FaceSettings:
+    """Validate and store. Raises ValueError with a pt-BR message."""
+    values = {"t_auto": t_auto, "t_suggest": t_suggest, "cluster_eps": cluster_eps}
+    for field, value in values.items():
+        low, high = SETTINGS_RANGES[field]
+        if not low <= value <= high:
+            raise ValueError(f"{field} deve ficar entre {low} e {high}")
+    if t_suggest > t_auto:
+        raise ValueError("o limiar de sugestão não pode ser maior que o de atribuição automática")
+    for field, value in values.items():
+        conn.execute(
+            "INSERT INTO meta (key, value) VALUES (?, ?)"
+            " ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (SETTINGS_META[field], repr(float(value))),
+        )
+    conn.commit()
+    return load_settings(conn)
+
+
+def reset_settings(conn: sqlite3.Connection) -> FaceSettings:
+    conn.executemany("DELETE FROM meta WHERE key = ?", [(k,) for k in SETTINGS_META.values()])
+    conn.commit()
+    return FaceSettings()
 
 
 @dataclass(frozen=True)

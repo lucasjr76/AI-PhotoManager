@@ -341,3 +341,36 @@ def test_monitor_thread_runs_by_itself(sample_dir: Path) -> None:
         assert c.get("/api/index").json()["summary"]["processed"] == 1
     finally:
         c.app.state.monitor_stop.set()  # type: ignore[attr-defined]
+
+
+def test_settings_api(db_path: Path) -> None:
+    c = make_client(db_path)
+    got = c.get("/api/settings").json()
+    assert got["t_auto"] == got["defaults"]["t_auto"] == 0.7
+    saved = c.post("/api/settings", json={"t_auto": 0.65, "t_suggest": 0.55, "cluster_eps": 0.3})
+    assert saved.status_code == 200 and saved.json()["t_auto"] == 0.65
+    assert c.get("/api/settings").json()["t_suggest"] == 0.55
+    bad = c.post("/api/settings", json={"t_auto": 0.5, "t_suggest": 0.6, "cluster_eps": 0.3})
+    assert bad.status_code == 400 and "sugestão" in bad.json()["detail"]
+    applied = c.post(
+        "/api/settings", json={"t_auto": 0.65, "t_suggest": 0.55, "cluster_eps": 0.3, "apply": True}
+    ).json()
+    assert "grouping" in applied
+    reset = c.post(
+        "/api/settings", json={"t_auto": 0, "t_suggest": 0, "cluster_eps": 0, "reset": True}
+    )
+    assert reset.json()["t_auto"] == 0.7
+
+
+def test_info_marks_ai_identified_people(db_path: Path) -> None:
+    conn = sqlite3.connect(db_path)
+    file_id = conn.execute(
+        "SELECT id FROM files WHERE rel_path = 'WhatsApp Images/IMG-20230514-WA0001.jpg'"
+    ).fetchone()[0]
+    conn.execute("UPDATE people SET name = 'Maria'")
+    conn.execute("UPDATE faces SET assign_source = 'auto', assign_score = 0.81")
+    conn.commit()
+    conn.close()
+    c = make_client(db_path)
+    [person] = c.get(f"/api/files/{file_id}/info").json()["people"]
+    assert person["name"] == "Maria" and person["ai"] is True and person["score"] == 0.81

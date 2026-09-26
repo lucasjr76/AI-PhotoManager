@@ -29,7 +29,14 @@ from aipdm.core import db
 from aipdm.core.clip import ClipImageModel, preprocess
 from aipdm.core.dates import resolve_date
 from aipdm.core.documents import ocr_pdf, read_docx, read_pdf
-from aipdm.core.faces import DetectedFace, FaceModel, FaceSettings, GroupingStats, group_faces
+from aipdm.core.faces import (
+    DetectedFace,
+    FaceModel,
+    FaceSettings,
+    GroupingStats,
+    group_faces,
+    load_settings,
+)
 from aipdm.core.images import load_image, read_gps, save_thumbnail, working_copy
 from aipdm.core.ocr import OcrModel
 from aipdm.core.paths import models_dir, thumbs_dir_for
@@ -562,8 +569,8 @@ def index(
     On the main thread, Ctrl+C sets it too."""
     started = time.monotonic()
     root = root.resolve()
-    settings = face_settings or FaceSettings()
     conn = db.connect(db_path)
+    settings = face_settings or load_settings(conn)  # the folder's Configurações
     try:
         db.set_meta(conn, "root_path", str(root))
         stats = IndexStats(scan(conn, root, force=force, retry_errors=retry_errors))

@@ -208,3 +208,32 @@ def test_user_actions(conn: sqlite3.Connection) -> None:
     assert conn.execute("SELECT hidden FROM people WHERE id = ?", (person,)).fetchone()[0] == 1
     with pytest.raises(ValueError):
         merge_people(conn, person, person)
+
+
+def test_settings_saved_per_folder_and_validated(conn: sqlite3.Connection) -> None:
+    from aipdm.core.faces import load_settings, reset_settings, save_settings
+
+    assert load_settings(conn) == FaceSettings()
+    saved = save_settings(conn, t_auto=0.62, t_suggest=0.5, cluster_eps=0.25)
+    assert (saved.t_auto, saved.t_suggest, saved.cluster_eps) == (0.62, 0.5, 0.25)
+    assert load_settings(conn) == saved
+    assert saved.min_score == FaceSettings().min_score  # untouched fields keep defaults
+    with pytest.raises(ValueError, match="sugestão"):
+        save_settings(conn, t_auto=0.5, t_suggest=0.6, cluster_eps=0.3)
+    with pytest.raises(ValueError):
+        save_settings(conn, t_auto=1.5, t_suggest=0.6, cluster_eps=0.3)
+    assert load_settings(conn) == saved  # rejected values are not stored
+    assert reset_settings(conn) == load_settings(conn) == FaceSettings()
+
+
+def test_grouping_follows_saved_settings(conn: sqlite3.Connection) -> None:
+    from aipdm.core.faces import load_settings, save_settings
+
+    for _ in range(4):
+        add_face(conn, near(IDENTITIES[0], 0.99))
+    group_faces(conn, SETTINGS)
+    conn.execute("UPDATE people SET name = 'Maria'")
+    face = add_face(conn, near(IDENTITIES[0], 0.75))
+    save_settings(conn, t_auto=0.7, t_suggest=0.6, cluster_eps=0.1)
+    group_faces(conn, load_settings(conn))
+    assert person_of(conn, face)[1] == "auto"  # 0.75 >= the saved t_auto
