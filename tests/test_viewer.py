@@ -78,6 +78,7 @@ def test_info(client: TestClient) -> None:
     photo = client.get(f"/api/files/{files['20260527_151731.heic']}/info").json()
     assert photo["kind"] == "image" and photo["width"] == 800 and photo["people"] == []
     assert photo["taken_at"] == "2026-05-27T15:17:31"
+    assert photo["format"] == "HEIF" and photo["date_source"] == "camera_name"
     assert client.get(f"/api/files/{files['doc.pdf']}/info").json()["pages"] == 2
     docx = client.get(f"/api/files/{files['relatorio.docx']}/info").json()
     assert "João da Silva" in docx["text"] and "Florianópolis" in docx["text"]
@@ -90,3 +91,33 @@ def test_open_without_system_app_is_reported(
     file_id = ids(client)["20260527_151731.heic"]
     got = client.post(f"/api/files/{file_id}/open")
     assert got.status_code == 409 and "Nenhum programa" in got.json()["detail"]
+
+
+def test_describe_exif() -> None:
+    from PIL.TiffImagePlugin import IFDRational
+
+    from aipdm.core.images import describe_exif
+
+    base = {0x010F: "samsung", 0x0110: "Galaxy S26 Ultra\x00", 0x0131: "S938BXXU1"}
+    exif = {
+        0x829A: IFDRational(1, 120),
+        0x829D: IFDRational(17, 10),
+        0x8827: 50,
+        0x920A: IFDRational(63, 10),
+        0xA405: 24,
+        0xA434: "Galaxy S26 Ultra Rear Camera",
+        0x9209: 0,
+    }
+    assert describe_exif(base, exif) == [
+        ("Câmera", "samsung Galaxy S26 Ultra"),
+        ("Lente", "Galaxy S26 Ultra Rear Camera"),
+        ("Exposição", "1/120 s"),
+        ("Abertura", "f/1.7"),
+        ("ISO", "50"),
+        ("Distância focal", "6.3 mm (24 mm equiv.)"),
+        ("Flash", "não disparado"),
+        ("Software", "S938BXXU1"),
+    ]
+    # Empty/garbage values (0/0 rationals, blank strings) are left out.
+    assert describe_exif({0x010F: "\x00"}, {0x829A: IFDRational(0, 0), 0x8827: (0,)}) == []
+    assert describe_exif({}, {0x829A: 2.0})[0] == ("Exposição", "2 s")

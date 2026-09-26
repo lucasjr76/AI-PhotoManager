@@ -28,7 +28,7 @@ from pydantic import BaseModel
 from aipdm.core import db, faces, paths, scanner
 from aipdm.core import search as searching
 from aipdm.core.documents import pdf_page_count, render_pdf_page
-from aipdm.core.images import PREVIEW_MAX_SIDE, load_image, save_preview
+from aipdm.core.images import PREVIEW_MAX_SIDE, load_image, read_exif_summary, save_preview
 from aipdm.core.paths import thumbs_dir_for
 
 log = logging.getLogger(__name__)
@@ -413,8 +413,8 @@ def create_app(
     @app.get("/api/files/{file_id}/info")
     def info(file_id: int, c: sqlite3.Connection = Conn) -> dict[str, object]:
         row = c.execute(
-            "SELECT id, rel_path, kind, taken_at, city, state, country, width, height, size"
-            " FROM files WHERE id = ? AND status != 'missing'",
+            "SELECT id, rel_path, kind, taken_at, date_source, city, state, country, lat, lon,"
+            " width, height, size FROM files WHERE id = ? AND status != 'missing'",
             (file_id,),
         ).fetchone()
         if row is None:
@@ -435,8 +435,16 @@ def create_app(
             "height": row["height"],
             "size": row["size"],
             "people": [{"id": r[0], "name": r[1]} for r in people_rows],
+            "date_source": row["date_source"],
+            "lat": row["lat"],
+            "lon": row["lon"],
         }
         path = root_of(c) / row["rel_path"]
+        if row["kind"] == "image":
+            try:
+                data["format"], data["exif"] = read_exif_summary(path)
+            except Exception:  # unreadable header: show what the database knows
+                data["format"], data["exif"] = None, []
         if row["kind"] == "pdf":
             try:
                 data["pages"] = pdf_page_count(path)

@@ -83,3 +83,60 @@ def save_preview(img: Image.Image, target: Path, max_side: int = PREVIEW_MAX_SID
     tmp = target.with_name(f"{target.name}.{id(view)}.tmp")
     view.save(tmp, "JPEG", quality=88)
     tmp.replace(target)
+
+
+# EXIF tags shown in the viewer (base IFD and Exif sub-IFD).
+MAKE, MODEL, SOFTWARE = 0x010F, 0x0110, 0x0131
+EXPOSURE, F_NUMBER, ISO, FLASH = 0x829A, 0x829D, 0x8827, 0x9209
+FOCAL, FOCAL_35MM, LENS = 0x920A, 0xA405, 0xA434
+
+
+def _number(value: object) -> float | None:
+    try:
+        number = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError, ZeroDivisionError):
+        return None
+    return number if number == number and number > 0 else None  # drop NaN (0/0) and 0
+
+
+def describe_exif(base: dict[int, object], exif: dict[int, object]) -> list[tuple[str, str]]:
+    """Human-readable (label, value) pairs, pt-BR, only for fields that are present."""
+    out: list[tuple[str, str]] = []
+    camera = " ".join(
+        str(v).strip("\x00 ")
+        for v in (base.get(MAKE), base.get(MODEL))
+        if v and str(v).strip("\x00 ")
+    )
+    if camera:
+        out.append(("Câmera", camera))
+    if lens := str(exif.get(LENS) or "").strip("\x00 "):
+        out.append(("Lente", lens))
+    if (t := _number(exif.get(EXPOSURE))) is not None:
+        out.append(("Exposição", f"1/{round(1 / t)} s" if t < 1 else f"{t:g} s"))
+    if (f := _number(exif.get(F_NUMBER))) is not None:
+        out.append(("Abertura", f"f/{f:.1f}"))
+    iso = exif.get(ISO)
+    if isinstance(iso, tuple | list):
+        iso = iso[0] if iso else None
+    if (i := _number(iso)) is not None:
+        out.append(("ISO", f"{i:.0f}"))
+    if (mm := _number(exif.get(FOCAL))) is not None:
+        eq = _number(exif.get(FOCAL_35MM))
+        out.append(("Distância focal", f"{mm:.1f} mm" + (f" ({eq:.0f} mm equiv.)" if eq else "")))
+    flash = exif.get(FLASH)
+    if isinstance(flash, int):
+        out.append(("Flash", "disparado" if flash & 1 else "não disparado"))
+    if software := str(base.get(SOFTWARE) or "").strip("\x00 "):
+        out.append(("Software", software))
+    return out
+
+
+def read_exif_summary(path: Path) -> tuple[str | None, list[tuple[str, str]]]:
+    """(format, EXIF pairs) from the header only: no pixel decoding."""
+    with path.open("rb") as fh, Image.open(fh) as img:
+        base = img.getexif()
+        try:
+            details = dict(base.get_ifd(EXIF_IFD))
+        except Exception:
+            details = {}
+        return img.format, describe_exif(dict(base), details)

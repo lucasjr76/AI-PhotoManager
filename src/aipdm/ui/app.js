@@ -85,19 +85,73 @@ function fmtSize(bytes) {
   return bytes > 1 << 20 ? `${(bytes / (1 << 20)).toFixed(1)} MB` : `${Math.round(bytes / 1024)} KB`;
 }
 
-// In-app viewer. items: [{file_id}], shows items[index]; ←/→ other files, ↑/↓ PDF pages, Esc.
+const DATE_SOURCES = {
+  whatsapp_android: "nome do arquivo (WhatsApp)", whatsapp_desktop: "nome do arquivo (WhatsApp)",
+  camera_name: "nome do arquivo (câmera)", exif: "EXIF da foto", document: "metadados do documento",
+  mtime: "data de modificação do arquivo",
+};
+
+// Zoom and pan for the viewer image: wheel zooms at the cursor, drag pans, double click
+// toggles fit / 2.5x. The image is laid out "fit to screen"; zoom is a CSS transform.
+function zoomable(img, stage) {
+  let scale = 1, x = 0, y = 0, drag = null;
+  const apply = () => {
+    img.style.transform = `translate(${x}px, ${y}px) scale(${scale})`;
+    stage.classList.toggle("zoomed", scale > 1);
+  };
+  const zoomAt = (factor, cx, cy) => {
+    const next = Math.min(8, Math.max(1, scale * factor));
+    const rect = img.getBoundingClientRect();
+    // keep the point under the cursor fixed while scaling
+    const ox = cx - (rect.left + rect.width / 2), oy = cy - (rect.top + rect.height / 2);
+    x -= ox * (next / scale - 1);
+    y -= oy * (next / scale - 1);
+    scale = next;
+    if (scale === 1) x = y = 0;
+    apply();
+  };
+  stage.addEventListener("wheel", (e) => {
+    e.preventDefault();
+    zoomAt(e.deltaY < 0 ? 1.2 : 1 / 1.2, e.clientX, e.clientY);
+  }, { passive: false });
+  img.addEventListener("dblclick", (e) => zoomAt(scale > 1 ? 1 / scale : 2.5, e.clientX, e.clientY));
+  img.addEventListener("mousedown", (e) => {
+    if (scale === 1) return;
+    e.preventDefault();
+    drag = { sx: e.clientX - x, sy: e.clientY - y };
+  });
+  const move = (e) => { if (drag) { x = e.clientX - drag.sx; y = e.clientY - drag.sy; apply(); } };
+  const release = () => { drag = null; };
+  window.addEventListener("mousemove", move);
+  window.addEventListener("mouseup", release);
+  const center = () => { const r = stage.getBoundingClientRect(); return [r.left + r.width / 2, r.top + r.height / 2]; };
+  return {
+    reset: () => { scale = 1; x = y = 0; apply(); },
+    zoomIn: () => zoomAt(1.25, ...center()),
+    zoomOut: () => zoomAt(1 / 1.25, ...center()),
+    destroy: () => {
+      window.removeEventListener("mousemove", move);
+      window.removeEventListener("mouseup", release);
+    },
+  };
+}
+
+// In-app viewer. items: [{file_id}], shows items[index].
+// Keys: ←/→ other files, ↑/↓ PDF pages, + − 0 zoom, Esc closes.
 function openViewer(items, index) {
   let i = index;
   let page = 1;
   let pages = 1;
   let seq = 0;  // ignore responses for files the user already moved past
-  const img = h("img", { class: "viewer-img", alt: "" });
+  let lastInfo = null;
+  const img = h("img", { class: "viewer-img", alt: "", draggable: "false" });
   const text = h("pre", { class: "viewer-text", hidden: true });
   const failed = h("div", { class: "empty", hidden: true }, "Não foi possível abrir este arquivo.");
   const side = h("aside", { class: "viewer-info" });
   const stage = h("div", { class: "viewer-stage" }, img, text, failed);
   const overlay = h("div", { class: "viewer", role: "dialog", "aria-modal": "true" }, stage, side);
-  overlay.addEventListener("click", (e) => { if (e.target === overlay || e.target === stage) close(); });
+  const zoom = zoomable(img, stage);
+  stage.addEventListener("click", (e) => { if (e.target === stage) close(); });
   img.addEventListener("error", () => { if (img.getAttribute("src")) { img.hidden = true; failed.hidden = false; } });
 
   const go = (delta) => {
@@ -111,40 +165,53 @@ function openViewer(items, index) {
     const next = page + delta;
     if (next < 1 || next > pages) return;
     page = next;
+    zoom.reset();
     img.src = `/api/files/${items[i].file_id}/view?page=${page}`;
     drawSide(lastInfo);
   };
-  let lastInfo = null;
+  const row = (label, value) => value ? h("tr", {}, h("th", {}, label), h("td", {}, value)) : null;
 
-  const drawSide = (info) => {
+  function drawSide(info) {
     put(side,
       h("div", { class: "toolbar" },
-        h("button", { onclick: () => go(-1), disabled: i === 0, title: "←" }, "‹ Anterior"),
+        h("button", { onclick: () => go(-1), disabled: i === 0, title: "Anterior (←)" }, "‹"),
         h("span", { class: "muted" }, `${i + 1} de ${items.length}`),
-        h("button", { onclick: () => go(1), disabled: i === items.length - 1, title: "→" }, "Próximo ›"),
-        h("button", { class: "close", onclick: close, title: "Esc" }, "✕")),
+        h("button", { onclick: () => go(1), disabled: i === items.length - 1, title: "Próximo (→)" }, "›"),
+        h("span", { class: "spacer" }),
+        h("button", { onclick: zoom.zoomOut, title: "Diminuir (−)" }, "−"),
+        h("button", { onclick: zoom.reset, title: "Ajustar à tela (0)" }, "⤢"),
+        h("button", { onclick: zoom.zoomIn, title: "Ampliar (+)" }, "+"),
+        h("button", { class: "close", onclick: close, title: "Fechar (Esc)" }, "✕")),
       info ? [
         h("h2", {}, info.rel_path.split("/").pop()),
-        h("div", {}, fmtDate(info.taken_at)),
-        info.place ? h("div", {}, `📍 ${info.place}`) : null,
         info.people.length ? h("div", { class: "chips" }, info.people.map((p) =>
           h("a", { class: "chip", href: `#/pessoa/${p.id}`, onclick: close }, p.name))) : null,
         info.kind === "pdf" && pages > 1 ? h("div", { class: "toolbar" },
           h("button", { onclick: () => turn(-1), disabled: page === 1, title: "↑" }, "‹ Página"),
           h("span", {}, `${page} de ${pages}`),
           h("button", { onclick: () => turn(1), disabled: page === pages, title: "↓" }, "Página ›")) : null,
-        h("div", { class: "muted small" },
-          [info.width ? `${info.width} × ${info.height} px` : null, fmtSize(info.size)].filter(Boolean).join(" · ")),
+        h("table", { class: "exif" },
+          row("Data", info.taken_at ? fmtDate(info.taken_at) : "sem data"),
+          row("Origem da data", DATE_SOURCES[info.date_source]),
+          row("Local", info.place),
+          row("Coordenadas", info.lat != null ? `${info.lat.toFixed(5)}, ${info.lon.toFixed(5)}` : null),
+          (info.exif || []).map(([label, value]) => row(label, value)),
+          row("Dimensões", info.width ? `${info.width} × ${info.height} px (${(info.width * info.height / 1e6).toFixed(1)} MP)` : null),
+          row("Formato", info.format || info.kind.toUpperCase()),
+          row("Tamanho", fmtSize(info.size)),
+          row("Páginas", info.pages)),
         h("div", { class: "muted small path" }, info.rel_path),
         h("button", { onclick: () => openFile(info.id) }, "Abrir no visualizador do sistema"),
+        h("div", { class: "muted small" }, "Roda do mouse: zoom · arrastar: mover · duplo clique: 2,5× / ajustar"),
       ] : h("div", { class: "muted" }, "Carregando…"));
-  };
+  }
 
   const show = async () => {
     const mine = ++seq;
     const item = items[i];
     lastInfo = null;
     failed.hidden = true;
+    zoom.reset();
     drawSide(null);
     const info = await api(`/api/files/${item.file_id}/info`);
     if (mine !== seq) return;
@@ -166,15 +233,21 @@ function openViewer(items, index) {
   };
 
   const onKey = (e) => {
-    const actions = { ArrowLeft: () => go(-1), ArrowRight: () => go(1), ArrowUp: () => turn(-1),
-      ArrowDown: () => turn(1), PageUp: () => turn(-1), PageDown: () => turn(1), Escape: close };
+    const actions = {
+      ArrowLeft: () => go(-1), ArrowRight: () => go(1), ArrowUp: () => turn(-1), ArrowDown: () => turn(1),
+      PageUp: () => turn(-1), PageDown: () => turn(1), Escape: close,
+      "+": zoom.zoomIn, "=": zoom.zoomIn, "-": zoom.zoomOut, "0": zoom.reset,
+    };
     if (actions[e.key]) { e.preventDefault(); actions[e.key](); }
   };
   function close() {
     document.removeEventListener("keydown", onKey);
+    zoom.destroy();
+    document.body.classList.remove("viewer-open");
     overlay.remove();
   }
   document.addEventListener("keydown", onKey);
+  document.body.classList.add("viewer-open");  // no page scrolling behind the viewer
   document.body.append(overlay);
   show();
 }

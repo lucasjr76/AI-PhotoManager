@@ -29,7 +29,7 @@ O usuário baixa o app, aponta uma pasta (ex.: backup descriptografado do WhatsA
 ## 3. Stack
 
 - **Python 3.12**, gerenciado com **uv** (`pyproject.toml`, `uv.lock`).
-- **UI:** FastAPI (backend local) + HTML/CSS/JS puro (sem build step de frontend) exibido em janela nativa via **pywebview**, que usa o motor web do sistema: WebKitGTK no Linux (backend GTK: `pywebview[gtk]` → PyGObject/pycairo, LGPL, compilados na instalação; exige `webkit2gtk-4.1` do sistema) e Edge WebView2 no Windows. Sem Qt (traria um Chromium de ~240 MB).
+- **UI:** FastAPI (backend local) + HTML/CSS/JS puro (sem build step de frontend) exibido em janela nativa via **pywebview**, que usa o motor web do sistema: WebKitGTK no Linux (backend GTK: `pywebview[gtk]` → PyGObject/pycairo, LGPL, compilados na instalação; exige `webkit2gtk-4.1` do sistema) e Edge WebView2 no Windows. Sem Qt (traria um Chromium de ~240 MB). No Linux o app define `WEBKIT_DISABLE_DMABUF_RENDERER=1` e `WEBKIT_DISABLE_COMPOSITING_MODE=1` (renderização por software): com o driver proprietário da NVIDIA o processo do WebKit caía (SIGSEGV em `libnvidia-gpucomp`, SIGABRT em `libEGL_nvidia` ao sair). O usuário pode sobrescrever as variáveis.
 - **Banco:** SQLite (WAL) + **FTS5** para texto. Embeddings como BLOB `float32`; similaridade por força bruta com numpy (volumes até ~50k itens).
 - **Imagens:** Pillow + `pillow-heif` (HEIC). Thumbnails em cache próprio.
   Atenção: os wheels do `pillow-heif` são **GPLv2** (incluem libx265); aceito pelo responsável do projeto em 2026-09-24 (alternativa LGPL `pi-heif` foi descontinuada).

@@ -1,7 +1,9 @@
 """Start the local server on 127.0.0.1:<random port> and show the UI (RNF-8)."""
 
+import os
 import secrets
 import socket
+import sys
 import threading
 import time
 import webbrowser
@@ -48,6 +50,13 @@ def serve(db_path: Path | None, *, browser: bool = False) -> None:
             print("Interface aberta no navegador. Ctrl+C para encerrar.")
             thread.join()
         else:
+            # WebKitGTK + NVIDIA's proprietary driver crash the web process (seen: SIGSEGV
+            # in libnvidia-gpucomp while compositing, SIGABRT in libEGL_nvidia at exit).
+            # Software rendering avoids the GPU path; the UI is images and text, so it is
+            # plenty. Users can still override either variable.
+            if sys.platform.startswith("linux"):
+                os.environ.setdefault("WEBKIT_DISABLE_DMABUF_RENDERER", "1")
+                os.environ.setdefault("WEBKIT_DISABLE_COMPOSITING_MODE", "1")
             import webview  # imported late: needs GTK/WebView2, not required for --browser
 
             webview.create_window(TITLE, url, width=1280, height=860, js_api=WindowApi())
