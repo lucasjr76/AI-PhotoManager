@@ -82,6 +82,23 @@ jobs:
           ./build/dist/AI-PhotoDocsManager/AI-PhotoDocsManager.exe doctor | tee build/doctor.txt
           grep -q "Tudo certo" build/doctor.txt
 
+      - name: Teste da interface do pacote (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $env:AIPDM_DATA_DIR = "$PWD\build\smoke-ui"
+          $p = Start-Process -FilePath "build\dist\AI-PhotoDocsManager\AI-PhotoDocsManager.exe" -PassThru
+          $log = "$env:AIPDM_DATA_DIR\aipdm.log"
+          $ok = $false
+          foreach ($i in 1..90) {
+            Start-Sleep -Seconds 2
+            if ((Test-Path $log) -and (Select-String -Path $log -Pattern "interface carregada|falha|erro|Traceback" -Quiet)) { break }
+          }
+          if (Test-Path $log) { Get-Content $log } else { "sem log" }
+          $ok = (Test-Path $log) -and (Select-String -Path $log -Pattern "interface carregada" -Quiet)
+          Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+          if (-not $ok) { exit 1 }
+
       - name: AppImage (Linux)
         if: runner.os == 'Linux'
         run: packaging/build_appimage.sh "${{ steps.version.outputs.value }}"
