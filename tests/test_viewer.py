@@ -87,7 +87,7 @@ def test_info(client: TestClient) -> None:
 def test_open_without_system_app_is_reported(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(server_app, "has_default_app", lambda _path: False)
+    monkeypatch.setattr(server_app, "open_in_system", lambda _path: False)
     file_id = ids(client)["20260527_151731.heic"]
     got = client.post(f"/api/files/{file_id}/open")
     assert got.status_code == 409 and "Nenhum programa" in got.json()["detail"]
@@ -206,3 +206,12 @@ def test_faces_only_for_photos(marking: TestClient) -> None:
         ).status_code
         == 404
     )
+
+
+def test_open_in_system_linux_without_association(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(server_app.sys, "platform", "linux")
+    monkeypatch.setattr(server_app, "has_default_app", lambda _path: False)
+    launched: list[object] = []
+    monkeypatch.setattr(server_app.subprocess, "Popen", lambda *a, **k: launched.append(a))
+    assert server_app.open_in_system(Path("foto.heic")) is False
+    assert launched == []  # nothing started when no program is associated

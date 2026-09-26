@@ -142,6 +142,20 @@ def has_default_app(path: Path) -> bool:
     return bool(mime and app)
 
 
+def open_in_system(path: Path) -> bool:
+    """Open with the OS default application. False when none is associated."""
+    if sys.platform == "win32":
+        try:
+            os.startfile(path)  # type: ignore[attr-defined]
+        except OSError:  # no association for the extension
+            return False
+        return True
+    if not has_default_app(path):
+        return False
+    subprocess.Popen(["xdg-open", str(path)], start_new_session=True)
+    return True
+
+
 def default_face_model() -> faces.FaceModel | None:
     try:
         return faces.FaceModel(paths.models_dir(), faces.FaceSettings())
@@ -477,16 +491,8 @@ def create_app(
     @app.post("/api/files/{file_id}/open")
     def open_file(file_id: int, c: sqlite3.Connection = Conn) -> dict[str, str]:
         path = root_of(c) / file_row(c, file_id)["rel_path"]
-        no_app = HTTPException(409, "Nenhum programa do sistema abre este tipo de arquivo.")
-        if sys.platform == "win32":
-            try:
-                os.startfile(path)  # type: ignore[attr-defined]
-            except OSError as exc:  # no association for the extension
-                raise no_app from exc
-            return {"ok": "sim"}
-        if not has_default_app(path):
-            raise no_app
-        subprocess.Popen(["xdg-open", str(path)], start_new_session=True)
+        if not open_in_system(path):
+            raise HTTPException(409, "Nenhum programa do sistema abre este tipo de arquivo.")
         return {"ok": "sim"}
 
     # --- in-app viewer -----------------------------------------------------------
