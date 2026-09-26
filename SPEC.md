@@ -151,7 +151,7 @@ CREATE VIRTUAL TABLE texts USING fts5(
 
 Índices em `files(taken_at)`, `files(status)`, `faces(person_id)`, `faces(file_id)`.
 
-Migrações: v1 (files, meta, texts), v2 (people, faces, face_negatives, clip_embeddings), v3 (`files.lat, lon, city, state, country` + índice por lugar).
+Migrações: v1 (files, meta, texts), v2 (people, faces, face_negatives, clip_embeddings), v3 (`files.lat, lon, city, state, country` + índice por lugar), v4 (`faces.manual`: rosto marcado à mão).
 
 ## 8. Pipeline de indexação
 
@@ -177,6 +177,7 @@ Imagens são reduzidas para no máx. 1600 px no lado maior antes de rostos/OCR (
 - Calibrado na pasta real (30 pessoas nomeadas, 3.527 rostos): `eps` do DBSCAN = 0.3 (similaridade ≥ 0.7; com 0.35 pessoas diferentes se fundem, ARI 0.98 → 0.68), `min_samples` = 3, `T_auto` = 0.7 (nenhum par de pessoas diferentes chegou a 0.687), `T_suggest` = 0.6 (7,7% dos rostos têm alguém de outra pessoa acima — aceitável para uma pergunta). A calibração usa semelhança entre pessoas *diferentes*: medir "mesma pessoa" nos grupos nomeados seria circular, pois eles vieram do próprio DBSCAN. Com `eps` 0.5 (≈ limiar 0.363 do OpenCV) 80% dos rostos encadearam num único grupo. `aipdm faces regroup` refaz os grupos sem nome com os limiares atuais (mantém nomes, decisões do usuário e negativas). `T_auto` e `T_suggest` **devem ser calibrados** com `tools/calibrate_faces.py` na pasta de teste real (relatar precisão/recall).
 - Ações do usuário: nomear, renomear, mesclar pessoas, remover rosto de uma pessoa, marcar "não é esta pessoa" (gravar negativa para não sugerir de novo), ocultar pessoa.
 - Ações do usuário (`assign_source='user'`) nunca são sobrescritas por processamento automático.
+- No visualizador, cada rosto aparece com um quadro (verde = confirmado, roxo = IA, amarelo = sem pessoa); clicar permite dizer quem é, confirmar ou negar. "Marcar rosto" cria um rosto desenhado à mão (`manual = 1`, sempre decisão do usuário): o detector roda só na região ampliada, com limiar 0,5, para obter landmarks e a assinatura SFace; sem rosto encontrado, grava assinatura nula (vetor zero, similaridade 0 com tudo), que não participa de agrupamento nem atribuição. Rostos manuais sobrevivem ao reprocessamento; se o detector passar a achá-los (IoU > 0,5), a detecção herda a pessoa.
 - `T_auto`, `T_suggest` e `eps` são ajustáveis por pasta na tela Configurações (gravados em `meta`); "Salvar e reagrupar" refaz grupos sem nome e atribuições automáticas preservando nomes e decisões do usuário. Rostos atribuídos automaticamente (`auto`) exibem o selo **IA** com a semelhança; o usuário pode confirmá-los (viram `user`) ou filtrar só os de IA para revisão — útil para crianças, cuja aparência muda com a idade.
 
 ## 10. Busca

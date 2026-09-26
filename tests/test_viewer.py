@@ -121,3 +121,88 @@ def test_describe_exif() -> None:
     # Empty/garbage values (0/0 rationals, blank strings) are left out.
     assert describe_exif({0x010F: "\x00"}, {0x829A: IFDRational(0, 0), 0x8827: (0,)}) == []
     assert describe_exif({}, {0x829A: 2.0})[0] == ("Exposição", "2 s")
+
+
+class FakeFaceModel:
+    """Finds a face in any region whose width is even, none otherwise."""
+
+    def embed_region(self, rgb: object, box: tuple[int, int, int, int]) -> object:
+        import numpy as np
+
+        from aipdm.core.faces import DetectedFace
+
+        x, y, w, h = box
+        if w % 2:
+            return None
+        return DetectedFace((x + 1, y + 1, w - 2, h - 2), 0.66, np.eye(128, dtype=np.float32)[0])
+
+
+@pytest.fixture
+def marking(tmp_path: Path) -> TestClient:
+    root = tmp_path / "pasta"
+    root.mkdir()
+    heic(root / "foto.heic", (800, 600), orientation=6)  # displayed 600 x 800
+    make_pdf(root / "doc.pdf", ["texto"])
+    app = create_app(
+        None,
+        TOKEN,
+        HOST,
+        index_only=frozenset(),
+        workers=1,
+        monitor_interval=None,
+        face_model_factory=FakeFaceModel,  # type: ignore[arg-type]
+    )
+    c = TestClient(app, base_url=f"http://{HOST}")
+    c.get(f"/?t={TOKEN}", follow_redirects=False)
+    c.post("/api/folders/open", json={"path": str(root)})
+    wait_index(c)
+    return c
+
+
+def test_mark_face_by_hand(marking: TestClient) -> None:
+    files = ids(marking)
+    photo = files["foto.heic"]
+    empty = marking.get(f"/api/files/{photo}/faces").json()
+    assert (empty["width"], empty["height"], empty["faces"]) == (600, 800, [])  # oriented size
+
+    found = marking.post(
+        f"/api/files/{photo}/faces", json={"bbox": [100, 120, 80, 90], "name": "Ana"}
+    )
+    assert found.status_code == 200 and found.json()["signature"] is True
+    blank = marking.post(
+        f"/api/files/{photo}/faces", json={"bbox": [300, 300, 81, 90], "name": "ana"}
+    ).json()
+    assert blank["signature"] is False and blank["person_id"] == found.json()["person_id"]
+
+    listed = marking.get(f"/api/files/{photo}/faces").json()["faces"]
+    assert [(f["bbox"], f["name"], f["manual"], f["signature"], f["source"]) for f in listed] == [
+        ([101, 121, 78, 88], "Ana", True, True, "user"),  # detected box inside the drawn one
+        ([300, 300, 81, 90], "Ana", True, False, "user"),
+    ]
+    renamed = marking.post(f"/api/faces/{listed[1]['id']}/assign", json={"name": "Bia"})
+    assert renamed.status_code == 200
+    assert marking.post(f"/api/faces/{listed[1]['id']}/delete").status_code == 200
+    assert marking.post(f"/api/faces/{listed[1]['id']}/delete").status_code == 404
+    assert len(marking.get(f"/api/files/{photo}/faces").json()["faces"]) == 1
+
+
+@pytest.mark.parametrize(
+    "bbox", [[-5, 10, 50, 50], [580, 10, 50, 50], [10, 10, 4, 50], [10, 790, 50, 50]]
+)
+def test_mark_face_outside_photo_is_rejected(marking: TestClient, bbox: list[int]) -> None:
+    photo = ids(marking)["foto.heic"]
+    assert (
+        marking.post(f"/api/files/{photo}/faces", json={"bbox": bbox, "name": "X"}).status_code
+        == 400
+    )
+
+
+def test_faces_only_for_photos(marking: TestClient) -> None:
+    pdf = ids(marking)["doc.pdf"]
+    assert marking.get(f"/api/files/{pdf}/faces").status_code == 404
+    assert (
+        marking.post(
+            f"/api/files/{pdf}/faces", json={"bbox": [1, 1, 20, 20], "name": "X"}
+        ).status_code
+        == 404
+    )

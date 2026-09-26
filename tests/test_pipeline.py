@@ -128,3 +128,12 @@ def test_preprocess_matches_open_clip(size: tuple[int, int]) -> None:
         224, is_train=False, mean=open_clip.OPENAI_DATASET_MEAN, std=open_clip.OPENAI_DATASET_STD
     )(img).numpy()
     assert np.abs(preprocess(img) - reference).max() < 1e-4
+
+
+def test_embed_region_without_face_returns_none() -> None:
+    from aipdm.core.faces import FaceModel, FaceSettings
+
+    model = FaceModel(models_dir(), FaceSettings())
+    blank = np.full((400, 600, 3), 200, dtype=np.uint8)
+    assert model.embed_region(blank, (100, 100, 80, 80)) is None
+    assert model.embed_region(blank, (598, 398, 1, 1)) is None  # degenerate box at the edge

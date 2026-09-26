@@ -66,6 +66,9 @@ MIGRATIONS: tuple[str, ...] = (
     ALTER TABLE files ADD COLUMN country TEXT;
     CREATE INDEX files_place ON files(country, state, city);
     """,
+    """
+    ALTER TABLE faces ADD COLUMN manual INTEGER DEFAULT 0;
+    """,
 )
 
 

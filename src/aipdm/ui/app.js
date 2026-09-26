@@ -91,17 +91,18 @@ const DATE_SOURCES = {
   mtime: "data de modificação do arquivo",
 };
 
-// Zoom and pan for the viewer image: wheel zooms at the cursor, drag pans, double click
-// toggles fit / 2.5x. The image is laid out "fit to screen"; zoom is a CSS transform.
-function zoomable(img, stage) {
+// Zoom and pan for the viewer: wheel zooms at the cursor, drag pans, double click toggles
+// fit / 2.5x. `target` (image + face boxes) is laid out "fit to screen"; zoom is a CSS
+// transform, so the boxes follow. canPan(e) lets face boxes and drawing take the mouse.
+function zoomable(target, stage, canPan) {
   let scale = 1, x = 0, y = 0, drag = null;
   const apply = () => {
-    img.style.transform = `translate(${x}px, ${y}px) scale(${scale})`;
+    target.style.transform = `translate(${x}px, ${y}px) scale(${scale})`;
     stage.classList.toggle("zoomed", scale > 1);
   };
   const zoomAt = (factor, cx, cy) => {
     const next = Math.min(8, Math.max(1, scale * factor));
-    const rect = img.getBoundingClientRect();
+    const rect = target.getBoundingClientRect();
     // keep the point under the cursor fixed while scaling
     const ox = cx - (rect.left + rect.width / 2), oy = cy - (rect.top + rect.height / 2);
     x -= ox * (next / scale - 1);
@@ -114,9 +115,9 @@ function zoomable(img, stage) {
     e.preventDefault();
     zoomAt(e.deltaY < 0 ? 1.2 : 1 / 1.2, e.clientX, e.clientY);
   }, { passive: false });
-  img.addEventListener("dblclick", (e) => zoomAt(scale > 1 ? 1 / scale : 2.5, e.clientX, e.clientY));
-  img.addEventListener("mousedown", (e) => {
-    if (scale === 1) return;
+  target.addEventListener("dblclick", (e) => { if (canPan(e)) zoomAt(scale > 1 ? 1 / scale : 2.5, e.clientX, e.clientY); });
+  target.addEventListener("mousedown", (e) => {
+    if (scale === 1 || !canPan(e)) return;
     e.preventDefault();
     drag = { sx: e.clientX - x, sy: e.clientY - y };
   });
@@ -136,23 +137,41 @@ function zoomable(img, stage) {
   };
 }
 
+function faceLabel(f) {
+  if (!f.person_id) return "?";
+  return f.name || `Sem nome #${f.person_id}`;
+}
+
+function faceKind(f) {
+  if (!f.person_id || !f.name) return "unknown";
+  if (f.source === "auto") return "ai";
+  if (f.source === "suggested") return "suggested";
+  return "named";
+}
+
 // In-app viewer. items: [{file_id}], shows items[index].
-// Keys: ←/→ other files, ↑/↓ PDF pages, + − 0 zoom, Esc closes.
+// Keys: ←/→ other files, ↑/↓ PDF pages, + − 0 zoom, R show/hide faces, Esc closes.
 function openViewer(items, index) {
   let i = index;
   let page = 1;
   let pages = 1;
   let seq = 0;  // ignore responses for files the user already moved past
   let lastInfo = null;
+  let faceData = null;  // {width, height, faces} of the current photo
+  let selected = null;  // a face id, or {draft: [x, y, w, h]} for a box being marked
+  let drawing = false;
+  let showFaces = true;
   const img = h("img", { class: "viewer-img", alt: "", draggable: "false" });
+  const boxes = h("div", { class: "face-boxes" });
+  const canvas = h("div", { class: "viewer-canvas" }, img, boxes);
   const text = h("pre", { class: "viewer-text", hidden: true });
   const failed = h("div", { class: "empty", hidden: true }, "Não foi possível abrir este arquivo.");
   const side = h("aside", { class: "viewer-info" });
-  const stage = h("div", { class: "viewer-stage" }, img, text, failed);
+  const stage = h("div", { class: "viewer-stage" }, canvas, text, failed);
   const overlay = h("div", { class: "viewer", role: "dialog", "aria-modal": "true" }, stage, side);
-  const zoom = zoomable(img, stage);
+  const zoom = zoomable(canvas, stage, (e) => !drawing && !e.target.closest(".face-box"));
   stage.addEventListener("click", (e) => { if (e.target === stage) close(); });
-  img.addEventListener("error", () => { if (img.getAttribute("src")) { img.hidden = true; failed.hidden = false; } });
+  img.addEventListener("error", () => { if (img.getAttribute("src")) { canvas.hidden = true; failed.hidden = false; } });
 
   const go = (delta) => {
     const next = i + delta;
@@ -171,7 +190,133 @@ function openViewer(items, index) {
   };
   const row = (label, value) => value ? h("tr", {}, h("th", {}, label), h("td", {}, value)) : null;
 
+  // --- face boxes --------------------------------------------------------------
+  const pct = (v, total) => `${(100 * v) / total}%`;
+  const placeBox = (el, [x, y, w, h]) => {
+    Object.assign(el.style, { left: pct(x, faceData.width), top: pct(y, faceData.height),
+      width: pct(w, faceData.width), height: pct(h, faceData.height) });
+    return el;
+  };
+  const drawBoxes = () => {
+    if (!faceData || !showFaces) { put(boxes); return; }
+    put(boxes, faceData.faces.map((f) => placeBox(h("div", {
+      class: `face-box ${faceKind(f)}${selected === f.id ? " selected" : ""}`,
+      title: faceLabel(f),
+      onclick: (e) => { e.stopPropagation(); selected = f.id; drawBoxes(); drawSide(lastInfo); },
+    }, h("span", { class: "face-name" }, faceLabel(f),
+      f.source === "auto" ? h("span", { class: "ai-badge" }, `IA ${Math.round((f.score || 0) * 100)}%`) : null)), f.bbox)),
+    selected && selected.draft ? placeBox(h("div", { class: "face-box draft" }), selected.draft) : null);
+  };
+  const loadFaces = async (fileId, mine) => {
+    const data = await api(`/api/files/${fileId}/faces`).catch(() => null);
+    if (mine !== seq) return;
+    faceData = data;
+    drawBoxes();
+    drawSide(lastInfo);
+  };
+  const refreshFaces = async () => {
+    const mine = seq;
+    await Promise.all([refreshPeople(), loadFaces(items[i].file_id, mine)]);
+    const info = await api(`/api/files/${items[i].file_id}/info`);
+    if (mine === seq) { lastInfo = info; drawSide(info); }
+    refreshStatus();
+  };
+
+  // Drawing a new box: press, drag, release over the photo.
+  canvas.addEventListener("mousedown", (e) => {
+    if (!drawing || !faceData) return;
+    e.preventDefault();
+    const rect = canvas.getBoundingClientRect();
+    const toPx = (cx, cy) => [
+      Math.min(Math.max((cx - rect.left) / rect.width, 0), 1) * faceData.width,
+      Math.min(Math.max((cy - rect.top) / rect.height, 0), 1) * faceData.height];
+    const [x0, y0] = toPx(e.clientX, e.clientY);
+    const drag = (ev) => {
+      const [x1, y1] = toPx(ev.clientX, ev.clientY);
+      selected = { draft: [Math.round(Math.min(x0, x1)), Math.round(Math.min(y0, y1)),
+        Math.round(Math.abs(x1 - x0)), Math.round(Math.abs(y1 - y0))] };
+      drawBoxes();
+    };
+    const done = () => {
+      window.removeEventListener("mousemove", drag);
+      window.removeEventListener("mouseup", done);
+      drawing = false;
+      canvas.classList.remove("drawing");
+      if (!selected || !selected.draft || selected.draft[2] < 8 || selected.draft[3] < 8) {
+        selected = null;
+        toast("Arraste sobre o rosto para marcá-lo");
+      }
+      drawBoxes();
+      drawSide(lastInfo);
+    };
+    window.addEventListener("mousemove", drag);
+    window.addEventListener("mouseup", done);
+  });
+
+  const startDrawing = () => {
+    if (!faceData) return;
+    zoom.reset();
+    drawing = true;
+    selected = null;
+    canvas.classList.add("drawing");
+    showFaces = true;
+    drawBoxes();
+    toast("Arraste um retângulo sobre o rosto");
+  };
+
+  // Side panel section for the selected face (or the box being marked).
+  const facePanel = () => {
+    if (!selected || !faceData) return null;
+    const who = h("input", { type: "text", placeholder: "Quem é? (nome ou #id)", list: "people-names" });
+    const fileId = items[i].file_id;
+    if (selected.draft) {
+      const save = async () => {
+        if (!who.value.trim()) return toast("Digite quem é");
+        const r = await api(`/api/files/${fileId}/faces`, { bbox: selected.draft, ...resolvePerson(who.value) });
+        toast(r.signature ? "Rosto marcado" : "Rosto marcado, mas o modelo não o reconheceu: não servirá de referência para outras fotos");
+        selected = r.face_id;
+        refreshFaces();
+      };
+      who.addEventListener("keydown", (e) => { if (e.key === "Enter") save(); });
+      requestAnimationFrame(() => who.focus());
+      return h("div", { class: "face-panel" },
+        h("strong", {}, "Novo rosto marcado"),
+        h("div", { class: "toolbar" }, who, h("button", { class: "primary", onclick: save }, "Salvar"),
+          h("button", { onclick: () => { selected = null; drawBoxes(); drawSide(lastInfo); } }, "Cancelar")));
+    }
+    const f = faceData.faces.find((x) => x.id === selected);
+    if (!f) return null;
+    const act = async (fn, msg) => { await fn(); toast(msg); refreshFaces(); };
+    const assign = () => {
+      if (!who.value.trim()) return toast("Digite quem é");
+      act(() => api(`/api/faces/${f.id}/assign`, resolvePerson(who.value)), "Rosto atribuído");
+    };
+    who.addEventListener("keydown", (e) => { if (e.key === "Enter") assign(); });
+    requestAnimationFrame(() => who.focus());
+    const status = !f.person_id ? "Rosto sem pessoa"
+      : f.source === "auto" ? `${faceLabel(f)} (identificado pela IA, ${Math.round((f.score || 0) * 100)}%)`
+      : f.source === "suggested" ? `Sugestão: ${faceLabel(f)}?`
+      : faceLabel(f);
+    return h("div", { class: "face-panel" },
+      h("div", { class: "face-head" }, h("img", { src: crop(f.id), alt: "" }),
+        h("div", {}, h("strong", {}, status),
+          f.manual ? h("div", { class: "muted small" }, f.signature ? "marcado à mão" : "marcado à mão · sem assinatura (não serve de referência)") : null)),
+      h("div", { class: "toolbar" }, who, h("button", { class: "primary", onclick: assign }, f.person_id ? "Trocar" : "Salvar")),
+      h("div", { class: "toolbar" },
+        f.person_id && f.source !== "user" && f.name ? h("button", { class: "ok",
+          onclick: () => act(() => api(`/api/faces/${f.id}/assign`, { person_id: f.person_id }), "Confirmado") }, `Sim, é ${f.name}`) : null,
+        f.person_id && f.name ? h("button", { class: "danger",
+          onclick: () => act(() => api(`/api/faces/${f.id}/remove`, {}), "Removido desta pessoa") }, `Não é ${f.name}`) : null,
+        f.manual ? h("button", { class: "danger",
+          onclick: () => act(async () => { await api(`/api/faces/${f.id}/delete`, {}); selected = null; }, "Marcação excluída") }, "Excluir marcação") : null,
+        f.person_id ? h("a", { class: "chip", href: `#/pessoa/${f.person_id}`, onclick: close }, "ver pessoa") : null));
+  };
+
   function drawSide(info) {
+    const faceList = faceData && faceData.faces.length ? h("div", { class: "face-list" },
+      faceData.faces.map((f) => h("button", { class: `face-chip ${faceKind(f)}${selected === f.id ? " selected" : ""}`,
+        onclick: () => { selected = f.id; showFaces = true; drawBoxes(); drawSide(lastInfo); } },
+        h("img", { src: crop(f.id), alt: "" }), faceLabel(f)))) : null;
     put(side,
       h("div", { class: "toolbar" },
         h("button", { onclick: () => go(-1), disabled: i === 0, title: "Anterior (←)" }, "‹"),
@@ -184,10 +329,12 @@ function openViewer(items, index) {
         h("button", { class: "close", onclick: close, title: "Fechar (Esc)" }, "✕")),
       info ? [
         h("h2", {}, info.rel_path.split("/").pop()),
-        info.people.length ? h("div", { class: "chips" }, info.people.map((p) =>
-          h("a", { class: "chip" + (p.ai ? " ai" : ""), href: `#/pessoa/${p.id}`, onclick: close,
-            title: p.ai ? "Identificado automaticamente pela IA; confirme na tela da pessoa" : "" },
-            p.name, p.ai ? h("span", { class: "ai-badge" }, `IA ${Math.round((p.score || 0) * 100)}%`) : null))) : null,
+        faceData ? h("div", { class: "toolbar" },
+          h("strong", {}, `Rostos (${faceData.faces.length})`),
+          h("button", { onclick: () => { showFaces = !showFaces; drawBoxes(); }, title: "Mostrar/ocultar quadros (R)" }, showFaces ? "Ocultar quadros" : "Mostrar quadros"),
+          h("button", { class: drawing ? "primary" : "", onclick: startDrawing, title: "Para rostos que não foram detectados" }, "+ Marcar rosto")) : null,
+        faceList,
+        facePanel(),
         info.kind === "pdf" && pages > 1 ? h("div", { class: "toolbar" },
           h("button", { onclick: () => turn(-1), disabled: page === 1, title: "↑" }, "‹ Página"),
           h("span", {}, `${page} de ${pages}`),
@@ -204,7 +351,7 @@ function openViewer(items, index) {
           row("Páginas", info.pages)),
         h("div", { class: "muted small path" }, info.rel_path),
         h("button", { onclick: () => openFile(info.id) }, "Abrir no visualizador do sistema"),
-        h("div", { class: "muted small" }, "Roda do mouse: zoom · arrastar: mover · duplo clique: 2,5× / ajustar"),
+        h("div", { class: "muted small" }, "Roda do mouse: zoom · arrastar: mover · duplo clique: 2,5× / ajustar · clique num quadro: quem é"),
       ] : h("div", { class: "muted" }, "Carregando…"));
   }
 
@@ -212,33 +359,45 @@ function openViewer(items, index) {
     const mine = ++seq;
     const item = items[i];
     lastInfo = null;
+    faceData = null;
+    selected = null;
+    drawing = false;
+    canvas.classList.remove("drawing");
     failed.hidden = true;
     zoom.reset();
+    put(boxes);
     drawSide(null);
+    if (!people.length) refreshPeople();
     const info = await api(`/api/files/${item.file_id}/info`);
     if (mine !== seq) return;
     lastInfo = info;
     pages = info.pages || 1;
     if (info.kind === "docx") {
-      img.hidden = true;
+      canvas.hidden = true;
       img.removeAttribute("src");
       text.hidden = false;
       text.textContent = info.text || "(documento sem texto)";
     } else {
       text.hidden = true;
-      img.hidden = false;
+      canvas.hidden = false;
       img.src = `/api/files/${item.file_id}/view?page=${page}`;
     }
     drawSide(info);
+    if (info.kind === "image") loadFaces(item.file_id, mine);
     const next = items[i + 1];  // warm the next preview so → is instant
     if (next && next.kind !== "docx") new Image().src = `/api/files/${next.file_id}/view`;
   };
 
   const onKey = (e) => {
+    if (e.target.tagName === "INPUT") {  // typing a name: only Esc leaves the field
+      if (e.key === "Escape") { e.target.blur(); selected = null; drawBoxes(); drawSide(lastInfo); }
+      return;
+    }
     const actions = {
       ArrowLeft: () => go(-1), ArrowRight: () => go(1), ArrowUp: () => turn(-1), ArrowDown: () => turn(1),
       PageUp: () => turn(-1), PageDown: () => turn(1), Escape: close,
       "+": zoom.zoomIn, "=": zoom.zoomIn, "-": zoom.zoomOut, "0": zoom.reset,
+      r: () => { showFaces = !showFaces; drawBoxes(); drawSide(lastInfo); },
     };
     if (actions[e.key]) { e.preventDefault(); actions[e.key](); }
   };

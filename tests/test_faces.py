@@ -237,3 +237,67 @@ def test_grouping_follows_saved_settings(conn: sqlite3.Connection) -> None:
     save_settings(conn, t_auto=0.7, t_suggest=0.6, cluster_eps=0.1)
     group_faces(conn, load_settings(conn))
     assert person_of(conn, face)[1] == "auto"  # 0.75 >= the saved t_auto
+
+
+def test_manual_face_saved_and_deletable(conn: sqlite3.Connection) -> None:
+    from aipdm.core.faces import add_manual_face, delete_manual_face
+
+    detected = add_face(conn, IDENTITIES[0])
+    file_id = conn.execute("SELECT file_id FROM faces WHERE id = ?", (detected,)).fetchone()[0]
+    ana = conn.execute("INSERT INTO people (name) VALUES ('Ana')").lastrowid
+    manual = add_manual_face(conn, file_id, (5, 6, 30, 40), None, ana)
+    row = conn.execute(
+        "SELECT bbox, person_id, assign_source, manual, embedding FROM faces WHERE id = ?",
+        (manual,),
+    ).fetchone()
+    assert (row[0], row[1], row[2], row[3]) == ("5,6,30,40", ana, "user", 1)
+    assert not any(row[4])  # no face found in the box: "no signature" embedding
+    assert delete_manual_face(conn, detected) is False  # detections cannot be deleted
+    assert delete_manual_face(conn, manual) is True
+
+
+def test_manual_face_with_detection_uses_its_box_and_signature(conn: sqlite3.Connection) -> None:
+    from aipdm.core.faces import add_manual_face
+
+    face = add_face(conn, IDENTITIES[1])
+    file_id = conn.execute("SELECT file_id FROM faces WHERE id = ?", (face,)).fetchone()[0]
+    ana = conn.execute("INSERT INTO people (name) VALUES ('Ana')").lastrowid
+    found = DetectedFace((12, 14, 28, 30), 0.62, IDENTITIES[0])
+    manual = add_manual_face(conn, file_id, (10, 10, 30, 30), found, ana)
+    bbox, blob = conn.execute(
+        "SELECT bbox, embedding FROM faces WHERE id = ?", (manual,)
+    ).fetchone()
+    assert bbox == "12,14,28,30"
+    assert np.allclose(np.frombuffer(blob, np.float32), IDENTITIES[0])
+
+
+def test_no_signature_faces_never_drive_grouping(conn: sqlite3.Connection) -> None:
+    from aipdm.core.faces import add_manual_face
+
+    face = add_face(conn, IDENTITIES[0])
+    file_id = conn.execute("SELECT file_id FROM faces WHERE id = ?", (face,)).fetchone()[0]
+    ana = conn.execute("INSERT INTO people (name) VALUES ('Ana')").lastrowid
+    for _ in range(3):
+        add_manual_face(conn, file_id, (1, 1, 20, 20), None, ana)  # 3 blank references
+    newcomer = add_face(conn, near(IDENTITIES[0], 0.99))
+    group_faces(conn, SETTINGS)
+    assert person_of(conn, newcomer)[0] != ana  # zero vectors match nobody
+
+
+def test_reprocessing_keeps_manual_faces(conn: sqlite3.Connection) -> None:
+    from aipdm.core.faces import add_manual_face
+
+    face = add_face(conn, IDENTITIES[0])
+    file_id = conn.execute("SELECT file_id FROM faces WHERE id = ?", (face,)).fetchone()[0]
+    ana = conn.execute("INSERT INTO people (name) VALUES ('Ana')").lastrowid
+    add_manual_face(conn, file_id, (100, 100, 50, 50), None, ana)  # detector missed it
+    add_manual_face(conn, file_id, (300, 300, 60, 60), None, ana)  # detector finds it later
+    _save_faces(conn, file_id, [DetectedFace((305, 302, 58, 60), 0.9, IDENTITIES[1])])
+    rows = conn.execute(
+        "SELECT bbox, person_id, assign_source, manual FROM faces WHERE file_id = ? ORDER BY id",
+        (file_id,),
+    ).fetchall()
+    assert [tuple(r) for r in rows] == [
+        ("100,100,50,50", ana, "user", 1),  # still missed: kept as drawn
+        ("305,302,58,60", ana, "user", 0),  # now detected: the detection inherits Ana
+    ]

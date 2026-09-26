@@ -20,6 +20,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
@@ -51,6 +52,12 @@ class Merge(BaseModel):
 class Assign(BaseModel):
     person_id: int | None = None
     name: str | None = None  # new person when person_id is None
+
+
+class MarkFace(BaseModel):
+    bbox: tuple[int, int, int, int]  # x, y, w, h in original (EXIF-oriented) pixels
+    person_id: int | None = None
+    name: str | None = None
 
 
 class OpenFolder(BaseModel):
@@ -107,6 +114,7 @@ class State:
     job: IndexJob | None = None
     monitor: Monitor = field(default_factory=Monitor)
     encoder: searching.TextEncoder | None = None
+    face_model: faces.FaceModel | None = None
     lock: threading.Lock = field(default_factory=threading.Lock)
 
 
@@ -134,6 +142,13 @@ def has_default_app(path: Path) -> bool:
     return bool(mime and app)
 
 
+def default_face_model() -> faces.FaceModel | None:
+    try:
+        return faces.FaceModel(paths.models_dir(), faces.FaceSettings())
+    except Exception:  # models missing: hand-marked faces are saved without a signature
+        return None
+
+
 def default_encoder() -> searching.TextEncoder | None:
     from aipdm.core.clip import ClipTextModel
 
@@ -149,6 +164,7 @@ def create_app(
     allowed_host: str,
     *,
     encoder_factory: Callable[[], searching.TextEncoder | None] = default_encoder,
+    face_model_factory: Callable[[], faces.FaceModel | None] = default_face_model,
     index_only: frozenset[str] | None = None,
     workers: int | None = None,
     monitor_interval: float | None = 60.0,
@@ -340,6 +356,86 @@ def create_app(
             faces.assign_face(c, face_id, existing[0])
             return {"person_id": existing[0]}
         return {"person_id": faces.assign_face_to_new_person(c, face_id, body.name or "")}
+
+    def person_for(c: sqlite3.Connection, person_id: int | None, name: str | None) -> int:
+        """An existing person by id or (case-insensitive) name, or a new named person."""
+        if person_id is not None:
+            if c.execute("SELECT 1 FROM people WHERE id = ?", (person_id,)).fetchone() is None:
+                raise HTTPException(404, "pessoa não encontrada")
+            return person_id
+        clean = (name or "").strip()
+        if not clean:
+            raise HTTPException(400, "informe uma pessoa ou um nome")
+        row = c.execute("SELECT id FROM people WHERE name = ? COLLATE NOCASE", (clean,)).fetchone()
+        if row:
+            return int(row[0])
+        new_id = c.execute("INSERT INTO people (name) VALUES (?)", (clean,)).lastrowid
+        assert new_id is not None
+        return new_id
+
+    @app.get("/api/files/{file_id}/faces")
+    def file_faces(file_id: int, c: sqlite3.Connection = Conn) -> dict[str, object]:
+        """Face boxes of one photo, in original (EXIF-oriented) pixels, for the viewer."""
+        size = c.execute(
+            "SELECT width, height FROM files"
+            " WHERE id = ? AND kind = 'image' AND status != 'missing'",
+            (file_id,),
+        ).fetchone()
+        if size is None:
+            raise HTTPException(404)
+        rows = c.execute(
+            "SELECT fa.id, fa.bbox, fa.person_id, p.name, fa.assign_source, fa.assign_score,"
+            " fa.manual, fa.embedding FROM faces fa LEFT JOIN people p ON p.id = fa.person_id"
+            " WHERE fa.file_id = ? ORDER BY fa.id",
+            (file_id,),
+        ).fetchall()
+        return {
+            "width": size[0],
+            "height": size[1],
+            "faces": [
+                {
+                    "id": r[0],
+                    "bbox": [int(v) for v in r[1].split(",")],
+                    "person_id": r[2],
+                    "name": r[3],
+                    "source": r[4],
+                    "score": r[5],
+                    "manual": bool(r[6]),
+                    "signature": any(r[7]),  # False: hand-marked box with no face found
+                }
+                for r in rows
+            ],
+        }
+
+    @app.post("/api/files/{file_id}/faces")
+    def mark_face(file_id: int, body: MarkFace, c: sqlite3.Connection = Conn) -> dict[str, object]:
+        """A face the user drew by hand (the detector missed it)."""
+        row = c.execute(
+            "SELECT rel_path, width, height FROM files"
+            " WHERE id = ? AND kind = 'image' AND status != 'missing'",
+            (file_id,),
+        ).fetchone()
+        if row is None:
+            raise HTTPException(404)
+        x, y, w, h = body.bbox
+        if w < 8 or h < 8 or x < 0 or y < 0 or x + w > row["width"] or y + h > row["height"]:
+            raise HTTPException(400, "marque o rosto dentro da foto")
+        person_id = person_for(c, body.person_id, body.name)
+        with state.lock:  # load YuNet + SFace once, on first use
+            if state.face_model is None:
+                state.face_model = face_model_factory()
+        found = None
+        if state.face_model is not None:
+            rgb = np.asarray(load_image(root_of(c) / row["rel_path"]).image)
+            found = state.face_model.embed_region(rgb, (x, y, w, h))
+        face_id = faces.add_manual_face(c, file_id, (x, y, w, h), found, person_id)
+        return {"face_id": face_id, "person_id": person_id, "signature": found is not None}
+
+    @app.post("/api/faces/{face_id}/delete")
+    def delete_face(face_id: int, c: sqlite3.Connection = Conn) -> dict[str, str]:
+        if not faces.delete_manual_face(c, face_id):
+            raise HTTPException(404, "só rostos marcados à mão podem ser excluídos")
+        return {"ok": "sim"}
 
     @app.post("/api/faces/{face_id}/remove")
     def remove(face_id: int, c: sqlite3.Connection = Conn) -> dict[str, str]:

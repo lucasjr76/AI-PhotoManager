@@ -130,6 +130,83 @@ class FaceModel:
             )
         return found
 
+    def embed_region(
+        self, rgb: NDArray[np.uint8], box: tuple[int, int, int, int]
+    ) -> DetectedFace | None:
+        """Face inside a user-drawn `box` (x, y, w, h in `rgb` pixels), or None.
+
+        The region (plus margin) is scaled so the box is ~200 px and searched with a
+        lower score bar than indexing, to find the landmarks SFace needs for alignment.
+        The returned bbox is the detected one, in `rgb` coordinates.
+        """
+        x, y, w, h = box
+        margin = max(w, h) // 2
+        x0, y0 = max(0, x - margin), max(0, y - margin)
+        x1, y1 = min(rgb.shape[1], x + w + margin), min(rgb.shape[0], y + h + margin)
+        if x1 - x0 < 8 or y1 - y0 < 8:
+            return None
+        zoom = 200 / max(w, h, 1)
+        region = cv2.resize(
+            np.ascontiguousarray(rgb[y0:y1, x0:x1]),
+            None,
+            fx=zoom,
+            fy=zoom,
+            interpolation=cv2.INTER_CUBIC if zoom > 1 else cv2.INTER_AREA,
+        )
+        bgr = cv2.cvtColor(region, cv2.COLOR_RGB2BGR)
+        self.detector.setInputSize((bgr.shape[1], bgr.shape[0]))
+        self.detector.setScoreThreshold(MANUAL_MIN_SCORE)
+        try:
+            _, raw = self.detector.detect(bgr)
+        finally:
+            self.detector.setScoreThreshold(self.settings.min_score)
+        if raw is None or not len(raw):
+            return None
+        # The detection whose centre is closest to the centre of the user's box.
+        cx, cy = (x + w / 2 - x0) * zoom, (y + h / 2 - y0) * zoom
+        row = min(raw, key=lambda r: (r[0] + r[2] / 2 - cx) ** 2 + (r[1] + r[3] / 2 - cy) ** 2)
+        feature = self.recognizer.feature(self.recognizer.alignCrop(bgr, row))
+        fx, fy, fw, fh = (float(v) / zoom for v in row[:4])
+        return DetectedFace(
+            (round(fx + x0), round(fy + y0), round(fw), round(fh)),
+            float(row[-1]),
+            normalize(np.asarray(feature, dtype=np.float32).reshape(EMBEDDING_DIM)),
+        )
+
+
+# A drawn box with no face found inside still gets saved, with this "no signature"
+# embedding: similarity 0 to everything, so it never drives grouping or assignment.
+NO_SIGNATURE = np.zeros(EMBEDDING_DIM, dtype=np.float32)
+MANUAL_MIN_SCORE = 0.5
+
+
+def add_manual_face(
+    conn: sqlite3.Connection,
+    file_id: int,
+    bbox: tuple[int, int, int, int],
+    face: DetectedFace | None,
+    person_id: int,
+) -> int:
+    """Save a face the user marked by hand, assigned to `person_id` (a user decision)."""
+    box, score, embedding = (
+        (face.bbox, face.score, face.embedding) if face else (bbox, 0.0, NO_SIGNATURE)
+    )
+    face_id = conn.execute(
+        "INSERT INTO faces (file_id, bbox, det_score, embedding, person_id, assign_source, manual)"
+        " VALUES (?, ?, ?, ?, ?, 'user', 1)",
+        (file_id, ",".join(map(str, box)), score, to_blob(embedding), person_id),
+    ).lastrowid
+    assert face_id is not None
+    conn.commit()
+    return face_id
+
+
+def delete_manual_face(conn: sqlite3.Connection, face_id: int) -> bool:
+    """Only hand-marked faces can be deleted (detections come back on reindex)."""
+    deleted = conn.execute("DELETE FROM faces WHERE id = ? AND manual = 1", (face_id,)).rowcount
+    conn.commit()
+    return bool(deleted)
+
 
 def to_blob(embedding: Embedding) -> bytes:
     return np.asarray(embedding, dtype=np.float32).tobytes()

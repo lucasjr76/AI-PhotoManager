@@ -430,7 +430,10 @@ def _iou(a: tuple[int, int, int, int], b: tuple[int, int, int, int]) -> float:
 
 
 def _save_faces(conn: sqlite3.Connection, file_id: int, faces: list[DetectedFace]) -> None:
-    """Replace a file's faces, carrying user decisions over to the matching new box."""
+    """Replace a file's faces, carrying user decisions over to the matching new box.
+
+    Hand-marked faces the detector still misses are kept as they are.
+    """
     kept = [
         (tuple(int(v) for v in bbox.split(",")), person_id)
         for bbox, person_id in conn.execute(
@@ -438,7 +441,20 @@ def _save_faces(conn: sqlite3.Connection, file_id: int, faces: list[DetectedFace
             (file_id,),
         )
     ]
+    manual = conn.execute(
+        "SELECT bbox, det_score, embedding, person_id, assign_source FROM faces"
+        " WHERE file_id = ? AND manual = 1",
+        (file_id,),
+    ).fetchall()
     conn.execute("DELETE FROM faces WHERE file_id = ?", (file_id,))
+    for row in manual:
+        box = tuple(int(v) for v in row[0].split(","))
+        if not any(_iou(face.bbox, box) > 0.5 for face in faces):  # type: ignore[arg-type]
+            conn.execute(
+                "INSERT INTO faces (file_id, bbox, det_score, embedding, person_id,"
+                " assign_source, manual) VALUES (?, ?, ?, ?, ?, ?, 1)",
+                (file_id, *row),
+            )
     for face in faces:
         person, source = None, None
         for bbox, person_id in kept:
