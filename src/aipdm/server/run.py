@@ -1,5 +1,6 @@
 """Start the local server on 127.0.0.1:<random port> and show the UI (RNF-8)."""
 
+import logging
 import os
 import secrets
 import socket
@@ -14,6 +15,8 @@ import uvicorn
 from aipdm.server.app import create_app
 
 TITLE = "AI-PhotoDocsManager"
+ICON = Path(__file__).resolve().parents[1] / "ui" / "icon.png"
+log = logging.getLogger(__name__)
 
 
 def start(db_path: Path | None) -> tuple[str, str, uvicorn.Server, threading.Thread]:
@@ -44,11 +47,15 @@ class WindowApi:
 def serve(db_path: Path | None, *, browser: bool = False) -> None:
     base, token, server, thread = start(db_path)
     url = f"{base}/?t={token}"
+
+    def in_browser() -> None:
+        webbrowser.open(url)
+        print("Interface aberta no navegador. Ctrl+C para encerrar.")
+        thread.join()
+
     try:
         if browser:
-            webbrowser.open(url)
-            print("Interface aberta no navegador. Ctrl+C para encerrar.")
-            thread.join()
+            in_browser()
         else:
             # WebKitGTK + NVIDIA's proprietary driver crash the web process (seen: SIGSEGV
             # in libnvidia-gpucomp while compositing, SIGABRT in libEGL_nvidia at exit).
@@ -57,10 +64,14 @@ def serve(db_path: Path | None, *, browser: bool = False) -> None:
             if sys.platform.startswith("linux"):
                 os.environ.setdefault("WEBKIT_DISABLE_DMABUF_RENDERER", "1")
                 os.environ.setdefault("WEBKIT_DISABLE_COMPOSITING_MODE", "1")
-            import webview  # imported late: needs GTK/WebView2, not required for --browser
+            try:
+                import webview  # imported late: needs GTK/WebView2, not required for --browser
 
-            webview.create_window(TITLE, url, width=1280, height=860, js_api=WindowApi())
-            webview.start()
+                webview.create_window(TITLE, url, width=1280, height=860, js_api=WindowApi())
+                webview.start(icon=ICON if ICON.exists() else None)
+            except Exception:  # no WebKitGTK/WebView2 on this machine: still usable
+                log.exception("janela nativa indisponível; abrindo no navegador")
+                in_browser()
     except KeyboardInterrupt:
         pass
     finally:

@@ -137,3 +137,27 @@ def test_embed_region_without_face_returns_none() -> None:
     blank = np.full((400, 600, 3), 200, dtype=np.uint8)
     assert model.embed_region(blank, (100, 100, 80, 80)) is None
     assert model.embed_region(blank, (598, 398, 1, 1)) is None  # degenerate box at the edge
+
+
+def test_ocr_never_downloads(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """RapidOCR downloads any model it cannot find; ours must all be given locally."""
+    import shutil
+
+    from rapidocr.utils import download_file
+
+    from aipdm.core.ocr import CLS_FILE, DET_FILE, REC_FILE, OcrModel
+
+    def refuse(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("RapidOCR tentou baixar um modelo")
+
+    monkeypatch.setattr(download_file.DownloadFile, "run", refuse)
+    local = tmp_path / "modelos"
+    local.mkdir()
+    for name in (DET_FILE, REC_FILE, CLS_FILE):
+        shutil.copy(models_dir() / name, local / name)
+    OcrModel(local, 1)  # all three present: loads, no download
+
+    (local / CLS_FILE).unlink()
+    with pytest.raises(Exception) as missing:  # a missing model is an error, never a download
+        OcrModel(local, 1)
+    assert "baixar" not in str(missing.value)

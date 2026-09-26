@@ -1,0 +1,103 @@
+# Tests, then packages: Linux AppImage (Ubuntu 22.04) and Windows installer (Inno Setup).
+# Models come from the private release "models-v1" (checked against models/LICENSES.md).
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write  # attach the packages to a release when a v* tag is pushed
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, windows-latest]
+    runs-on: ${{ matrix.os }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      UV_PYTHON: "3.12"
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Bibliotecas do sistema para PyGObject/WebKitGTK (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgirepository1.0-dev libcairo2-dev pkg-config \
+            gir1.2-webkit2-4.1 libwebkit2gtk-4.1-0 libfuse2
+
+      - name: Modelos (release models-v1)
+        run: |
+          gh release download models-v1 --pattern models-v1.zip --dir build
+          unzip -o build/models-v1.zip -d models
+
+      - name: Dependências
+        run: uv sync --locked
+
+      - name: Conferir modelos (SHA-256) e licenças
+        run: uv run aipdm doctor
+
+      - name: Lint, formatação e tipos
+        run: |
+          uv run ruff check .
+          uv run ruff format --check .
+          uv run mypy src/aipdm/core
+
+      - name: Testes
+        run: uv run pytest -q
+
+      - name: PyInstaller
+        run: uv run pyinstaller --noconfirm --clean --distpath build/dist --workpath build/work packaging/aipdm.spec
+
+      - name: Versão
+        id: version
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then v="${GITHUB_REF#refs/tags/v}"; else v="0.1.0-dev.${GITHUB_RUN_NUMBER}"; fi
+          echo "value=$v" >> "$GITHUB_OUTPUT"
+
+      - name: Teste do pacote sem Python do sistema (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          AIPDM_DATA_DIR=build/smoke build/dist/AI-PhotoDocsManager/AI-PhotoDocsManager doctor
+          unshare -rn build/dist/AI-PhotoDocsManager/AI-PhotoDocsManager doctor  # no network
+
+      - name: Teste do pacote (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          export AIPDM_DATA_DIR="$PWD/build/smoke"
+          ./build/dist/AI-PhotoDocsManager/AI-PhotoDocsManager.exe doctor || { cat build/smoke/aipdm.log; exit 1; }
+          cat build/smoke/aipdm.log
+          grep -q "Tudo certo" build/smoke/aipdm.log
+
+      - name: AppImage (Linux)
+        if: runner.os == 'Linux'
+        run: packaging/build_appimage.sh "${{ steps.version.outputs.value }}"
+
+      - name: Instalador (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          choco install innosetup -y --no-progress
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "/DAppVersion=${{ steps.version.outputs.value }}" packaging\installer.iss
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: AI-PhotoDocsManager-${{ runner.os }}
+          path: build/installer/*
+          if-no-files-found: error
+
+      - name: Publicar na release da tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: gh release upload "${GITHUB_REF#refs/tags/}" build/installer/* --clobber || gh release create "${GITHUB_REF#refs/tags/}" build/installer/* --title "${GITHUB_REF#refs/tags/}" --notes "Pacotes gerados pelo CI."

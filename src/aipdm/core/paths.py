@@ -39,4 +39,6 @@ def thumbs_dir_for(db_path: Path) -> Path:
 def models_dir() -> Path:
     if override := os.environ.get("AIPDM_MODELS_DIR"):
         return Path(override)
+    if getattr(sys, "frozen", False):  # packaged app: models ship inside the bundle
+        return Path(getattr(sys, "_MEIPASS", Path(sys.executable).parent)) / "models"
     return Path(__file__).resolve().parents[3] / "models"

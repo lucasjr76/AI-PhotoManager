@@ -50,6 +50,15 @@ MODELS = [
         "b20bd37c168a570f583afbc8cd7925603890efbcdc000a59e22c269d160b5f5a",
         True,
     ),
+    (
+        # RapidOCR builds its orientation classifier even when disabled: give it a local
+        # file, or it downloads one at runtime (RNF-2).
+        "ch_ppocr_mobile_v2.0_cls_mobile.onnx",
+        "Apache-2.0",
+        RAPIDOCR.replace("PP-OCRv5", "PP-OCRv4") + "/cls/ch_ppocr_mobile_v2.0_cls_mobile.onnx",
+        "e47acedf663230f8863ff1ab0e64dd2d82b838fceb5957146dab185a89d6215c",
+        True,
+    ),
     ("clip_image.onnx", "MIT", CLIP_SOURCE, None, False),
     ("clip_text.onnx", "MIT", CLIP_SOURCE + ", int8", None, False),
     (

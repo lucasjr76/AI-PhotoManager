@@ -11,3 +11,4 @@ models/*.json
 graphify-out/
 .claude/settings.local.json
 models/*.gz
+build.log
