@@ -21,7 +21,13 @@ if TYPE_CHECKING:
     import uvicorn
 
 TITLE = "AI-PhotoDocsManager"
-ICON = Path(__file__).resolve().parents[1] / "ui" / "icon.png"
+# Windows (WinForms) only accepts .ico for the window icon: a PNG throws inside .NET, in
+# a background thread, and kills the process silently. GTK takes the PNG.
+ICON = (
+    Path(__file__).resolve().parents[1]
+    / "ui"
+    / ("icon.ico" if sys.platform == "win32" else "icon.png")
+)
 log = logging.getLogger(__name__)
 
 PAGE_STYLE = (

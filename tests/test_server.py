@@ -374,3 +374,21 @@ def test_info_marks_ai_identified_people(db_path: Path) -> None:
     c = make_client(db_path)
     [person] = c.get(f"/api/files/{file_id}/info").json()["people"]
     assert person["name"] == "Maria" and person["ai"] is True and person["score"] == 0.81
+
+
+def test_window_icon_format_matches_platform(monkeypatch: pytest.MonkeyPatch) -> None:
+    """WinForms dies on a PNG window icon ("'picture' deve ser uma imagem ... Icon")."""
+    import importlib
+
+    from PIL import Image as PILImage
+
+    import aipdm.server.run as run
+
+    for platform, fmt in (("win32", "ICO"), ("linux", "PNG")):
+        monkeypatch.setattr("sys.platform", platform)
+        icon = importlib.reload(run).ICON
+        assert icon.exists()
+        with PILImage.open(icon) as img:
+            assert img.format == fmt
+    monkeypatch.undo()
+    importlib.reload(run)
