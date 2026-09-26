@@ -64,9 +64,100 @@ async function refreshStatus() {
 
 async function refreshPeople() {
   people = await api("/api/people?hidden=true");
-  const list = document.getElementById("people-names");
-  put(list, ...people.filter((p) => p.name).map((p) => h("option", { value: p.name })));
 }
+
+// --- person-name autocomplete ---------------------------------------------------------
+// Any <input data-people> gets it (WebKitGTK's <datalist> popup is unreliable). One shared
+// dropdown; matching ignores case and accents and finds any part of the name.
+const foldText = (t) => t.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+
+function peopleMatches(query) {
+  const q = foldText(query.trim());
+  if (!q || q.startsWith("#")) return [];
+  const words = q.split(/\s+/);
+  const ranked = [];
+  for (const p of people) {
+    if (!p.name) continue;
+    const name = foldText(p.name);
+    const nameWords = name.split(/\s+/);
+    // every typed word must start some word of the name (or appear inside it)
+    if (!words.every((w) => nameWords.some((nw) => nw.startsWith(w)) || name.includes(w))) continue;
+    const rank = name.startsWith(q) ? 0 : words.every((w) => nameWords.some((nw) => nw.startsWith(w))) ? 1 : 2;
+    ranked.push([rank, -p.files, p]);
+  }
+  ranked.sort((a, b) => a[0] - b[0] || a[1] - b[1] || a[2].name.localeCompare(b[2].name, "pt-BR"));
+  return ranked.slice(0, 8).map((r) => r[2]);
+}
+
+const suggestBox = h("div", { class: "suggest-box", hidden: true, role: "listbox" });
+document.body.append(suggestBox);
+let suggestFor = null;
+let suggestIndex = 0;
+let suggestItems = [];
+let suggestNavigated = false;  // the user moved through the list with the arrow keys
+
+function closeSuggest() {
+  suggestBox.hidden = true;
+  suggestFor = null;
+}
+
+function pickSuggestion(input, person) {
+  input.value = person.name;
+  closeSuggest();
+  input.dispatchEvent(new Event("change", { bubbles: true }));
+}
+
+function drawSuggest(input) {
+  suggestItems = peopleMatches(input.value);
+  if (!suggestItems.length) { closeSuggest(); return; }
+  suggestFor = input;
+  suggestIndex = Math.min(suggestIndex, suggestItems.length - 1);
+  put(suggestBox, suggestItems.map((p, n) => h("div", {
+    class: "suggest-item" + (n === suggestIndex ? " active" : ""), role: "option",
+    onmousedown: (e) => { e.preventDefault(); pickSuggestion(input, p); },
+  }, p.cover ? h("img", { src: crop(p.cover), alt: "" }) : null,
+    h("span", {}, p.name), h("span", { class: "muted small" }, `${p.files} fotos`))));
+  const r = input.getBoundingClientRect();
+  Object.assign(suggestBox.style, { left: `${r.left}px`, top: `${r.bottom + 2}px`, minWidth: `${r.width}px` });
+  suggestBox.hidden = false;
+}
+
+document.addEventListener("input", (e) => {
+  if (e.target.matches && e.target.matches("input[data-people]")) {
+    suggestIndex = 0;
+    suggestNavigated = false;
+    drawSuggest(e.target);
+  }
+});
+document.addEventListener("focusout", (e) => { if (e.target === suggestFor) closeSuggest(); });
+// Capture phase: runs before the field's own Enter handler, so Enter picks the
+// highlighted name and that handler then sees the completed value.
+document.addEventListener("keydown", (e) => {
+  if (!suggestFor || e.target !== suggestFor || suggestBox.hidden) return;
+  if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+    e.preventDefault();
+    e.stopPropagation();
+    const step = e.key === "ArrowDown" ? 1 : -1;
+    suggestIndex = (suggestIndex + step + suggestItems.length) % suggestItems.length;
+    suggestNavigated = true;
+    drawSuggest(suggestFor);
+  } else if (e.key === "Enter" || e.key === "Tab") {
+    const exact = suggestItems.find((p) => foldText(p.name) === foldText(suggestFor.value.trim()));
+    // data-people="free": a field where a brand-new name is normal (naming a group), so
+    // Enter keeps what was typed unless the user picked from the list with the arrows.
+    const free = suggestFor.dataset.people === "free" && !suggestNavigated;
+    if (e.key === "Tab" || (!exact && !free)) {
+      if (e.key === "Tab") e.preventDefault();
+      pickSuggestion(suggestFor, suggestItems[suggestIndex]);
+    } else {
+      closeSuggest();
+    }
+  } else if (e.key === "Escape") {
+    e.stopPropagation();
+    closeSuggest();
+  }
+}, true);
+window.addEventListener("resize", closeSuggest);
 
 // "Maria" -> existing person by name; "#12" -> person 12; else a new name.
 function resolvePerson(text) {
@@ -267,7 +358,7 @@ function openViewer(items, index) {
   // Side panel section for the selected face (or the box being marked).
   const facePanel = () => {
     if (!selected || !faceData) return null;
-    const who = h("input", { type: "text", placeholder: "Quem é? (nome ou #id)", list: "people-names" });
+    const who = h("input", { type: "text", placeholder: "Quem é? (nome ou #id)", "data-people": "1" });
     const fileId = items[i].file_id;
     if (selected.draft) {
       const save = async () => {
@@ -464,9 +555,9 @@ async function screenPerson(id) {
   await refreshPeople();
   const p = await api(`/api/people/${id}`);
   const selected = new Set();
-  const nameInput = h("input", { type: "text", class: "name-field", value: p.name || "", placeholder: "Nome desta pessoa", list: "people-names" });
-  const moveInput = h("input", { type: "text", placeholder: "Nome ou #id de destino", list: "people-names" });
-  const mergeInput = h("input", { type: "text", placeholder: "Mesclar com (nome ou #id)", list: "people-names" });
+  const nameInput = h("input", { type: "text", class: "name-field", value: p.name || "", placeholder: "Nome desta pessoa", "data-people": "free" });
+  const moveInput = h("input", { type: "text", placeholder: "Nome ou #id de destino", "data-people": "1" });
+  const mergeInput = h("input", { type: "text", placeholder: "Mesclar com (nome ou #id)", "data-people": "1" });
   const selInfo = h("span", { class: "muted" });
   const selBar = h("div", { class: "toolbar sticky" });
 
@@ -564,15 +655,20 @@ async function screenSuggestions() {
       h("img", { src: crop(s.cover), alt: "" }),
       h("button", { class: "ok", onclick: async () => { await api(`/api/faces/${s.face}/assign`, { person_id: s.person }); el.remove(); refreshStatus(); } }, "Sim"),
       h("button", { class: "danger", onclick: async () => { await api(`/api/faces/${s.face}/remove`, {}); el.remove(); refreshStatus(); } }, "Não"),
-      h("button", { onclick: async () => {
-        const who = prompt("Quem é? (nome ou #id)");
-        if (!who) return;
-        await api(`/api/faces/${s.face}/assign`, resolvePerson(who));
-        el.remove(); refreshPeople(); refreshStatus();
-      } }, "Outra pessoa…"));
-    return el;
+      h("button", { onclick: () => { other.hidden = !other.hidden; if (!other.hidden) otherInput.focus(); } }, "Outra pessoa…"));
+    const otherInput = h("input", { type: "text", placeholder: "Quem é? Comece a digitar o nome", "data-people": "1" });
+    const assignOther = async () => {
+      if (!otherInput.value.trim()) return toast("Digite quem é");
+      await api(`/api/faces/${s.face}/assign`, resolvePerson(otherInput.value));
+      el.remove(); other.remove(); refreshPeople(); refreshStatus();
+      toast("Rosto atribuído");
+    };
+    otherInput.addEventListener("keydown", (e) => { if (e.key === "Enter") assignOther(); });
+    const other = h("div", { class: "toolbar suggestion-other", hidden: true },
+      otherInput, h("button", { class: "primary", onclick: assignOther }, "Salvar"));
+    return [el, other];
   };
-  list.append(...items.map(row));
+  list.append(...items.flatMap(row));
   put(view, h("h1", {}, "É esta pessoa?"),
     items.length ? list : h("div", { class: "empty" }, "Nenhuma sugestão pendente. Elas aparecem depois de você dar nome às pessoas e indexar fotos novas."));
 }
@@ -581,7 +677,7 @@ async function screenUnassigned() {
   await refreshPeople();
   const selected = new Set();
   let faces = [];
-  const target = h("input", { type: "text", placeholder: "Nome ou #id", list: "people-names" });
+  const target = h("input", { type: "text", placeholder: "Nome ou #id", "data-people": "1" });
   const info = h("span", { class: "muted" });
   const gridBox = h("div");
   const more = h("button", { onclick: () => load() }, "Carregar mais");
@@ -736,7 +832,7 @@ async function screenSearch() {
   };
   const drawChips = () => put(chips, ...st.people.map((p) =>
     h("span", { class: "chip" }, p.name, h("button", { title: "Remover", onclick: () => { st.people = st.people.filter((q) => q.id !== p.id); drawChips(); run(); } }, "×"))));
-  const personInput = h("input", { type: "text", placeholder: "+ pessoa", list: "people-names", class: "small-input" });
+  const personInput = h("input", { type: "text", placeholder: "+ pessoa", "data-people": "1", class: "small-input" });
   personInput.addEventListener("change", () => {
     const found = people.find((p) => p.name && p.name.toLowerCase() === personInput.value.trim().toLowerCase());
     if (found && !st.people.some((p) => p.id === found.id)) { st.people.push(found); drawChips(); run(); }

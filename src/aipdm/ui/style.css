@@ -247,3 +247,19 @@ body.viewer-open { overflow: hidden; }
 .setting p { margin: 4px 0 0; }
 .num-input { width: 90px; font: inherit; padding: 5px 8px; border-radius: 8px; border: 1px solid var(--line); background: var(--panel); color: var(--text); }
 .viewer-canvas[hidden] { display: none; }
+
+.suggest-box {
+  position: fixed; z-index: 50; background: var(--panel); color: var(--text);
+  border: 1px solid var(--line); border-radius: 10px; padding: 4px; box-shadow: 0 8px 24px #0006;
+  max-height: 60vh; overflow-y: auto;
+}
+.suggest-box[hidden] { display: none; }
+.suggest-item {
+  display: flex; align-items: center; gap: 8px; padding: 5px 8px; border-radius: 7px; cursor: pointer;
+}
+.suggest-item img { width: 28px; height: 28px; border-radius: 50%; object-fit: cover; }
+.suggest-item span:nth-of-type(1) { flex: 1; }
+.suggest-item.active, .suggest-item:hover { background: var(--selected); }
+.suggestion-other { margin: -4px 0 12px 126px; }
+.suggestion-other input { min-width: 320px; }
+.suggestion-other[hidden] { display: none; }
