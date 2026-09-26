@@ -3,6 +3,8 @@ name = "aipdm"
 version = "0.1.0"
 description = "Busca offline em fotos e documentos por pessoa, data, objeto e texto."
 requires-python = ">=3.12,<3.13"
+license = "GPL-3.0-or-later"
+license-files = ["LICENSE"]
 dependencies = [
     "fastapi>=0.141.1",
     "numpy>=2.5.3",

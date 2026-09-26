@@ -77,9 +77,10 @@ jobs:
         if: runner.os == 'Windows'
         run: |
           export AIPDM_DATA_DIR="$PWD/build/smoke"
-          ./build/dist/AI-PhotoDocsManager/AI-PhotoDocsManager.exe doctor || { cat build/smoke/aipdm.log; exit 1; }
-          cat build/smoke/aipdm.log
-          grep -q "Tudo certo" build/smoke/aipdm.log
+          # Launched from a shell the window app writes to the shell (the log file is only
+          # used when there is no console, e.g. from the Start menu).
+          ./build/dist/AI-PhotoDocsManager/AI-PhotoDocsManager.exe doctor | tee build/doctor.txt
+          grep -q "Tudo certo" build/doctor.txt
 
       - name: AppImage (Linux)
         if: runner.os == 'Linux'
