@@ -259,7 +259,27 @@ function openViewer(items, index) {
   const failed = h("div", { class: "empty", hidden: true }, "Não foi possível abrir este arquivo.");
   const side = h("aside", { class: "viewer-info" });
   const stage = h("div", { class: "viewer-stage" }, canvas, text, failed);
-  const overlay = h("div", { class: "viewer", role: "dialog", "aria-modal": "true" }, stage, side);
+  // "Apreciar" mode: photo only, no face boxes and no side panel. A switch fixed in the
+  // corner (not a click on the photo, which is for faces); remembered between photos
+  // and sessions. Key I toggles it too.
+  const cleanSwitch = h("input", { type: "checkbox" });
+  const cleanToggle = h("label", { class: "clean-toggle", title: "Mostrar ou esconder quadros dos rostos e informações (tecla I)" },
+    cleanSwitch, " Marcações e informações");
+  // Shown only in "apreciar" mode, where the side panel (with its buttons) is hidden.
+  const floating = [
+    h("button", { class: "float-nav prev", title: "Anterior (←)", onclick: () => go(-1) }, "‹"),
+    h("button", { class: "float-nav next", title: "Próximo (→)", onclick: () => go(1) }, "›"),
+    h("button", { class: "float-nav shut", title: "Fechar (Esc)", onclick: () => close() }, "✕"),
+  ];
+  const overlay = h("div", { class: "viewer", role: "dialog", "aria-modal": "true" }, stage, side, cleanToggle, floating);
+  const setClean = (clean) => {
+    overlay.classList.toggle("clean", clean);
+    cleanSwitch.checked = !clean;
+    try { localStorage.setItem("aipdm.viewerClean", clean ? "1" : "0"); } catch { /* private mode */ }
+    if (clean) { selected = null; drawing = false; canvas.classList.remove("drawing"); }
+    drawBoxes();
+  };
+  cleanSwitch.addEventListener("change", () => setClean(!cleanSwitch.checked));
   const zoom = zoomable(canvas, stage, (e) => !drawing && !e.target.closest(".face-box"));
   stage.addEventListener("click", (e) => { if (e.target === stage) close(); });
   img.addEventListener("error", () => { if (img.getAttribute("src")) { canvas.hidden = true; failed.hidden = false; } });
@@ -289,7 +309,7 @@ function openViewer(items, index) {
     return el;
   };
   const drawBoxes = () => {
-    if (!faceData || !showFaces) { put(boxes); return; }
+    if (!faceData || !showFaces || overlay.classList.contains("clean")) { put(boxes); return; }
     put(boxes, faceData.faces.map((f) => placeBox(h("div", {
       class: `face-box ${faceKind(f)}${selected === f.id ? " selected" : ""}`,
       title: faceLabel(f),
@@ -489,6 +509,7 @@ function openViewer(items, index) {
       PageUp: () => turn(-1), PageDown: () => turn(1), Escape: close,
       "+": zoom.zoomIn, "=": zoom.zoomIn, "-": zoom.zoomOut, "0": zoom.reset,
       r: () => { showFaces = !showFaces; drawBoxes(); drawSide(lastInfo); },
+      i: () => setClean(!overlay.classList.contains("clean")),
     };
     if (actions[e.key]) { e.preventDefault(); actions[e.key](); }
   };
@@ -501,6 +522,9 @@ function openViewer(items, index) {
   document.addEventListener("keydown", onKey);
   document.body.classList.add("viewer-open");  // no page scrolling behind the viewer
   document.body.append(overlay);
+  let startClean = false;
+  try { startClean = localStorage.getItem("aipdm.viewerClean") === "1"; } catch { /* private mode */ }
+  setClean(startClean);
   show();
 }
 

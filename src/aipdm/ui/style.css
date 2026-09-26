@@ -263,3 +263,24 @@ body.viewer-open { overflow: hidden; }
 .suggestion-other { margin: -4px 0 12px 126px; }
 .suggestion-other input { min-width: 320px; }
 .suggestion-other[hidden] { display: none; }
+
+.clean-toggle {
+  position: absolute; top: 12px; left: 12px; z-index: 3; color: #fff; font-size: 13px;
+  background: #0009; padding: 5px 10px; border-radius: 8px; cursor: pointer; user-select: none;
+  opacity: .75; transition: opacity .15s;
+}
+.clean-toggle:hover { opacity: 1; }
+.viewer.clean { grid-template-columns: minmax(0, 1fr); }
+.viewer.clean .viewer-info { display: none; }
+.viewer.clean .viewer-img { max-width: calc(100vw - 32px); }
+.viewer.clean .clean-toggle { opacity: .35; }
+.viewer.clean .clean-toggle:hover { opacity: 1; }
+.float-nav { display: none; }
+.viewer.clean .float-nav {
+  display: block; position: absolute; z-index: 3; background: #0007; color: #fff; border: 0;
+  font-size: 28px; line-height: 1; padding: 10px 14px; border-radius: 10px; opacity: .45;
+}
+.viewer.clean .float-nav:hover { opacity: 1; }
+.viewer.clean .float-nav.prev { left: 12px; top: 50%; transform: translateY(-50%); }
+.viewer.clean .float-nav.next { right: 12px; top: 50%; transform: translateY(-50%); }
+.viewer.clean .float-nav.shut { right: 12px; top: 12px; font-size: 18px; }
