@@ -251,6 +251,8 @@ Diretório de dados: Linux `~/.local/share/ai-photodocsmanager/`, Windows `%LOCA
 - PyInstaller, AppImage, Inno Setup, GitHub Actions, modelos embutidos.
 - ✅ Instala e roda em máquina limpa Windows 11 e Ubuntu/Zorin sem Python instalado, sem acesso à rede.
 
+Como foi feito: PyInstaller onedir (`packaging/aipdm.spec`, lançador `packaging/launcher.py` com `freeze_support`); modelos dentro do pacote, conferidos por SHA-256. Linux: AppImage gerado no Ubuntu 22.04 usando GTK/WebKitGTK **do sistema** (a pilha GTK da máquina de build é removida do pacote); sem WebKitGTK, abre no navegador. Windows: instalador Inno Setup por usuário (sem admin), WebView2 do sistema. CI (`.github/workflows/build.yml`): testes em Linux e Windows, pacote, teste do executável (Linux também sem rede), AppImage e instalador; tag `v*` publica os pacotes numa release. Modelos para o CI vêm da release `models-v1`. O RapidOCR recebe caminho local também para o classificador de orientação (sem isso ele baixava o modelo em tempo de execução). Licença do projeto: GPL-3.0-or-later (compatível com o x265 GPL-2.0+ dos binários do pillow-heif e com as dependências Apache-2.0).
+
 **Fase 5 — Refinamentos (backlog)**
 - ~~monitoramento da pasta~~ (feito), ~~busca por local se houver GPS~~ (feito, sem mapa), cifragem do banco (SQLCipher), vídeos (frame-chave), exportar resultado para pasta, mapa offline.
 
